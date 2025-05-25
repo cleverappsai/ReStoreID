@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import '../models/item_job.dart';
 import '../services/analysis_service.dart';
 import '../services/storage_service.dart';
-import 'results_screen.dart';
+import 'analysis_results_screen.dart';
 
 class ProcessingScreen extends StatefulWidget {
   final ItemJob job;

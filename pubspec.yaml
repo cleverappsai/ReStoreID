@@ -10,6 +10,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+
+  webview_flutter: ^4.4.2
+  html: ^0.15.4
   
   # Camera and image handling
   camera: ^0.10.5
@@ -32,6 +35,9 @@ dependencies:
   
   # JSON serialization
   json_annotation: ^4.9.0
+  
+  # Utilities
+  uuid: ^4.1.0
 
 dev_dependencies:
   flutter_test:
