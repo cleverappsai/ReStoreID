@@ -4,7 +4,7 @@
 import 'package:flutter/material.dart';
 import '../models/item_job.dart';
 import '../services/storage_service.dart';
-import '../services/summary_generation_service.dart';
+// import '../services/summary_generation_service.dart';
 import 'web_scraper_screen.dart';
 
 class AnalysisResultsScreen extends StatefulWidget {
@@ -128,85 +128,9 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
   }
 
   Future<void> _regenerateSummary() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Regenerate Summary'),
-        content: Text('This will regenerate the summary from source data and overwrite current changes. Continue?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text('Regenerate'),
-          ),
-        ],
-      ),
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Summary regeneration coming soon!')),
     );
-
-    if (confirmed != true) return;
-
-    setState(() => _isLoading = true);
-
-    try {
-      // Collect all data sources including current description
-      final dataSources = _collectDataSources();
-
-      // Add current description as a source
-      dataSources.add({
-        'url': 'local://user_description',
-        'title': 'User Description',
-        'fullText': _descriptionController.text.trim(),
-        'scrapedAt': DateTime.now().toIso8601String(),
-        'confidence': 0.9,
-        'dataType': 'user_input',
-      });
-
-      final summaryResult = await SummaryGenerationService.generateItemSummary(
-        dataSources: dataSources,
-        userDescription: _currentItem.userDescription,
-        searchKeywords: _currentItem.searchDescription,
-      );
-
-      final pricingResult = SummaryGenerationService.generatePricingSummary(dataSources);
-
-      // Update analysis result
-      final analysisResult = Map<String, dynamic>.from(_currentItem.analysisResult ?? {});
-      analysisResult['summary'] = {
-        ...summaryResult,
-        'regeneratedAt': DateTime.now().toIso8601String(),
-        'userEdited': false,
-      };
-      analysisResult['pricing'] = {
-        ...pricingResult,
-        'regeneratedAt': DateTime.now().toIso8601String(),
-        'userEdited': false,
-      };
-
-      final updatedItem = _currentItem.copyWith(analysisResult: analysisResult);
-      await StorageService.saveJob(updatedItem);
-
-      setState(() {
-        _currentItem = updatedItem;
-        _hasUnsavedChanges = false;
-      });
-
-      // Reinitialize controllers with new data
-      _disposeControllers();
-      _initializeControllers();
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Summary regenerated successfully')),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error regenerating summary: $e')),
-      );
-    } finally {
-      setState(() => _isLoading = false);
-    }
   }
 
   List<Map<String, dynamic>> _collectDataSources() {
@@ -308,6 +232,46 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
   }
 
   Widget _buildSummaryTab() {
+    final hasAnalysis = _currentItem.analysisResult?['summary'] != null;
+
+    if (!hasAnalysis) {
+      return Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.pending_actions, size: 64, color: Colors.grey[400]),
+            SizedBox(height: 16),
+            Text(
+              'Analysis Not Complete',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'This item needs to be analyzed to generate a summary.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey[600]),
+            ),
+            SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Analysis features coming soon!')),
+                );
+              },
+              icon: Icon(Icons.psychology),
+              label: Text('Analyze Item'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue[600],
+                foregroundColor: Colors.white,
+                padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return SingleChildScrollView(
       padding: EdgeInsets.all(16),
       child: Column(
@@ -491,6 +455,26 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
               );
             }).toList(),
           ],
+
+          if (scrapedSources.isEmpty && candidateMatches.isEmpty)
+            Center(
+              child: Column(
+                children: [
+                  Icon(Icons.web, size: 48, color: Colors.grey[400]),
+                  SizedBox(height: 16),
+                  Text(
+                    'No web sources available yet',
+                    style: TextStyle(color: Colors.grey[600]),
+                  ),
+                  SizedBox(height: 8),
+                  Text(
+                    'Run image searches to find candidate websites for scraping',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.grey[500], fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );
@@ -526,20 +510,21 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
           PopupMenuButton<String>(
             onSelected: (value) {
               if (value == 'regenerate') {
-                _regenerateSummary();
+               // _regenerateSummary();
               }
             },
             itemBuilder: (context) => [
-              PopupMenuItem(
-                value: 'regenerate',
-                child: Row(
-                  children: [
-                    Icon(Icons.refresh),
-                    SizedBox(width: 8),
-                    Text('Regenerate'),
-                  ],
+              if (_currentItem.analysisResult?['summary'] != null)
+                PopupMenuItem(
+                  value: 'regenerate',
+                  child: Row(
+                    children: [
+                      Icon(Icons.refresh),
+                      SizedBox(width: 8),
+                      Text('Regenerate'),
+                    ],
+                  ),
                 ),
-              ),
             ],
           ),
         ],
