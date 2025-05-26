@@ -82,7 +82,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 Navigator.pop(context);
                 final result = await Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (context) => ItemScreen(item: item)), // Pass existing item for edit
+                  MaterialPageRoute(builder: (context) => ItemScreen(existingItem: item)), // Pass existing item for edit
                 );
                 if (result != null) {
                   _loadRecentItems();

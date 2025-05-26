@@ -1,5 +1,5 @@
 // ========================================
-// lib/models/item_job.dart - UPDATED WITH TARGETED SEARCH
+// lib/models/item_job.dart
 // ========================================
 class ItemJob {
   final String id;
@@ -29,9 +29,6 @@ class ItemJob {
   bool webSearchCompleted;
   bool pricingCompleted;
 
-  // NEW: Enhanced analysis results for targeted search
-  TargetedSearchResults? targetedSearchResults;
-
   ItemJob({
     required this.id,
     required this.userDescription,
@@ -54,26 +51,12 @@ class ItemJob {
     this.classificationCompleted = false,
     this.webSearchCompleted = false,
     this.pricingCompleted = false,
-    this.targetedSearchResults, // NEW
   });
 
   // Convenience getters for backward compatibility
   String get description => userDescription;
   List<String> get imagePaths => images;
   bool get isCompleted => analysisResult != null;
-
-  // NEW: Targeted search getters
-  bool get hasTargetedSearchResults => targetedSearchResults != null;
-  bool get hasHighConfidenceProducts =>
-      targetedSearchResults?.identifiedProducts.any((p) => p.confidence >= 0.8) ?? false;
-
-  String get targetedSearchStatus {
-    if (targetedSearchResults == null) return 'Not analyzed';
-    final daysSince = DateTime.now().difference(targetedSearchResults!.analysisDate).inDays;
-    if (daysSince == 0) return 'Analyzed today';
-    if (daysSince == 1) return 'Analyzed yesterday';
-    return 'Analyzed $daysSince days ago';
-  }
 
   // Combined measurements getter for display
   String get measurementsDisplay {
@@ -108,7 +91,6 @@ class ItemJob {
       'classificationCompleted': classificationCompleted,
       'webSearchCompleted': webSearchCompleted,
       'pricingCompleted': pricingCompleted,
-      'targetedSearchResults': targetedSearchResults?.toJson(), // NEW
     };
   }
 
@@ -137,9 +119,6 @@ class ItemJob {
       classificationCompleted: json['classificationCompleted'] ?? false,
       webSearchCompleted: json['webSearchCompleted'] ?? false,
       pricingCompleted: json['pricingCompleted'] ?? false,
-      targetedSearchResults: json['targetedSearchResults'] != null // NEW
-          ? TargetedSearchResults.fromJson(json['targetedSearchResults'])
-          : null,
     );
   }
 
@@ -165,7 +144,6 @@ class ItemJob {
     bool? classificationCompleted,
     bool? webSearchCompleted,
     bool? pricingCompleted,
-    TargetedSearchResults? targetedSearchResults, // NEW
   }) {
     return ItemJob(
       id: id ?? this.id,
@@ -189,192 +167,6 @@ class ItemJob {
       classificationCompleted: classificationCompleted ?? this.classificationCompleted,
       webSearchCompleted: webSearchCompleted ?? this.webSearchCompleted,
       pricingCompleted: pricingCompleted ?? this.pricingCompleted,
-      targetedSearchResults: targetedSearchResults ?? this.targetedSearchResults, // NEW
     );
   }
-}
-
-// NEW: Targeted search results data structures
-class TargetedSearchResults {
-  final String summary;
-  final List<ProductIdentifier> identifiedProducts;
-  final List<SearchSource> searchSources;
-  final DateTime analysisDate;
-  final String? analysisVersion;
-  final Map<String, dynamic>? rawData;
-
-  TargetedSearchResults({
-    required this.summary,
-    required this.identifiedProducts,
-    required this.searchSources,
-    required this.analysisDate,
-    this.analysisVersion,
-    this.rawData,
-  });
-
-  TargetedSearchResults copyWith({
-    String? summary,
-    List<ProductIdentifier>? identifiedProducts,
-    List<SearchSource>? searchSources,
-    DateTime? analysisDate,
-    String? analysisVersion,
-    Map<String, dynamic>? rawData,
-  }) {
-    return TargetedSearchResults(
-      summary: summary ?? this.summary,
-      identifiedProducts: identifiedProducts ?? this.identifiedProducts,
-      searchSources: searchSources ?? this.searchSources,
-      analysisDate: analysisDate ?? this.analysisDate,
-      analysisVersion: analysisVersion ?? this.analysisVersion,
-      rawData: rawData ?? this.rawData,
-    );
-  }
-
-  // Helper methods
-  int get manufacturerSourcesCount =>
-      searchSources.where((s) => s.sourceType == 'manufacturer').length;
-
-  int get retailerSourcesCount =>
-      searchSources.where((s) => s.sourceType == 'retailer').length;
-
-  double get averageConfidence {
-    if (identifiedProducts.isEmpty) return 0.0;
-    return identifiedProducts.map((p) => p.confidence).reduce((a, b) => a + b) / identifiedProducts.length;
-  }
-
-  bool get hasHighConfidence {
-    return identifiedProducts.isNotEmpty &&
-        identifiedProducts.any((p) => p.confidence >= 0.8) &&
-        manufacturerSourcesCount > 0;
-  }
-
-  Map<String, dynamic> toJson() => {
-    'summary': summary,
-    'identifiedProducts': identifiedProducts.map((p) => p.toJson()).toList(),
-    'searchSources': searchSources.map((s) => s.toJson()).toList(),
-    'analysisDate': analysisDate.toIso8601String(),
-    'analysisVersion': analysisVersion,
-    'rawData': rawData,
-  };
-
-  factory TargetedSearchResults.fromJson(Map<String, dynamic> json) => TargetedSearchResults(
-    summary: json['summary'] ?? '',
-    identifiedProducts: (json['identifiedProducts'] as List? ?? [])
-        .map((p) => ProductIdentifier.fromJson(p))
-        .toList(),
-    searchSources: (json['searchSources'] as List? ?? [])
-        .map((s) => SearchSource.fromJson(s))
-        .toList(),
-    analysisDate: DateTime.parse(json['analysisDate'] ?? DateTime.now().toIso8601String()),
-    analysisVersion: json['analysisVersion'],
-    rawData: json['rawData'],
-  );
-}
-
-// Product identification from OCR
-class ProductIdentifier {
-  final String manufacturer;
-  final String productName;
-  final String modelNumber;
-  final double confidence;
-  final Map<String, dynamic>? specifications;
-  final List<String>? alternativeNames;
-
-  ProductIdentifier({
-    required this.manufacturer,
-    required this.productName,
-    required this.modelNumber,
-    required this.confidence,
-    this.specifications,
-    this.alternativeNames,
-  });
-
-  String get fullName => '$manufacturer $productName';
-
-  String get confidenceLevel {
-    if (confidence >= 0.9) return 'Very High';
-    if (confidence >= 0.8) return 'High';
-    if (confidence >= 0.6) return 'Medium';
-    if (confidence >= 0.4) return 'Low';
-    return 'Very Low';
-  }
-
-  Map<String, dynamic> toJson() => {
-    'manufacturer': manufacturer,
-    'productName': productName,
-    'modelNumber': modelNumber,
-    'confidence': confidence,
-    'specifications': specifications,
-    'alternativeNames': alternativeNames,
-  };
-
-  factory ProductIdentifier.fromJson(Map<String, dynamic> json) => ProductIdentifier(
-    manufacturer: json['manufacturer'] ?? '',
-    productName: json['productName'] ?? '',
-    modelNumber: json['modelNumber'] ?? '',
-    confidence: (json['confidence'] ?? 0.0).toDouble(),
-    specifications: json['specifications'],
-    alternativeNames: json['alternativeNames']?.cast<String>(),
-  );
-}
-
-// Search source information
-class SearchSource {
-  final String url;
-  final String title;
-  final String sourceType;
-  final double relevanceScore;
-  final DateTime? lastAccessed;
-  final Map<String, dynamic>? extractedData;
-  final String? contentSummary;
-
-  SearchSource({
-    required this.url,
-    required this.title,
-    required this.sourceType,
-    required this.relevanceScore,
-    this.lastAccessed,
-    this.extractedData,
-    this.contentSummary,
-  });
-
-  String get domain {
-    try {
-      return Uri.parse(url).host;
-    } catch (e) {
-      return 'Unknown';
-    }
-  }
-
-  bool get isOfficialSource => sourceType == 'manufacturer';
-
-  String get relevanceDescription {
-    if (relevanceScore >= 0.9) return 'Highly Relevant';
-    if (relevanceScore >= 0.7) return 'Very Relevant';
-    if (relevanceScore >= 0.5) return 'Relevant';
-    if (relevanceScore >= 0.3) return 'Somewhat Relevant';
-    return 'Low Relevance';
-  }
-
-  Map<String, dynamic> toJson() => {
-    'url': url,
-    'title': title,
-    'sourceType': sourceType,
-    'relevanceScore': relevanceScore,
-    'lastAccessed': lastAccessed?.toIso8601String(),
-    'extractedData': extractedData,
-    'contentSummary': contentSummary,
-  };
-
-  factory SearchSource.fromJson(Map<String, dynamic> json) => SearchSource(
-    url: json['url'] ?? '',
-    title: json['title'] ?? '',
-    sourceType: json['sourceType'] ?? '',
-    relevanceScore: (json['relevanceScore'] ?? 0.0).toDouble(),
-    lastAccessed: json['lastAccessed'] != null
-        ? DateTime.parse(json['lastAccessed'])
-        : null,
-    extractedData: json['extractedData'],
-    contentSummary: json['contentSummary'],
-  );
 }

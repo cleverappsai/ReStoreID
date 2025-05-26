@@ -1,30 +1,39 @@
 // ========================================
-// lib/screens/item_screen.dart - COMPLETE WITH OCR INTEGRATION
+// lib/screens/item_screen.dart - YOUR WORKING VERSION + OCR
 // ========================================
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:uuid/uuid.dart';
+import 'dart:io';
 import '../models/item_job.dart';
 import '../services/storage_service.dart';
-import '../services/ocr_service.dart';
-import '../services/enhanced_analysis_service.dart';
-import '../widgets/enhanced_summary_tab.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as path;
+import '../services/cloud_services.dart';
+import '../services/ocr_service.dart'; // NEW: Added OCR service
+import '../widgets/enhanced_summary_tab.dart'; // NEW: Added enhanced summary
+import 'image_processing_screen.dart';
+import 'analysis_results_screen.dart';
+import 'web_scraper_screen.dart';
 
 class ItemScreen extends StatefulWidget {
-  final ItemJob? item;
+  final ItemJob? existingItem; // null for new item, populated for edit
 
-  const ItemScreen({Key? key, this.item}) : super(key: key);
+  const ItemScreen({Key? key, this.existingItem}) : super(key: key);
+
+  // Factory constructor for compatibility with item parameter
+  factory ItemScreen.withItem({Key? key, ItemJob? item}) {
+    return ItemScreen(key: key, existingItem: item);
+  }
 
   @override
-  State<ItemScreen> createState() => _ItemScreenState();
+  _ItemScreenState createState() => _ItemScreenState();
 }
 
-class _ItemScreenState extends State<ItemScreen> with TickerProviderStateMixin {
+class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateMixin {
   late TabController _tabController;
-  late TextEditingController _descriptionController;
+  final _formKey = GlobalKey<FormState>();
+
+  // Form controllers
+  late TextEditingController _userDescriptionController;
   late TextEditingController _searchDescriptionController;
   late TextEditingController _lengthController;
   late TextEditingController _widthController;
@@ -32,497 +41,162 @@ class _ItemScreenState extends State<ItemScreen> with TickerProviderStateMixin {
   late TextEditingController _weightController;
   late TextEditingController _quantityController;
 
-  List<String> _images = [];
-  bool _isSaving = false;
-  bool _isProcessingOCR = false;
-  ItemJob? _currentItem;
+  // Summary controllers (for editing existing summaries)
+  late TextEditingController _titleController;
+  late TextEditingController _descriptionSummaryController;
+  late TextEditingController _estimatedValueController;
+  List<TextEditingController> _specControllers = [];
+  List<TextEditingController> _featureControllers = [];
 
-  final ImagePicker _picker = ImagePicker();
+  List<Map<String, String>> _labeledImages = [];
+  bool _isProcessing = false;
+  bool _isEditMode = false;
+  bool _hasSummaryData = false;
+  bool _hasUnsavedChanges = false;
+  bool _isProcessingOCR = false; // NEW: OCR processing state
+
+  // Current item data
+  ItemJob? _currentItem;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _isEditMode = widget.existingItem != null;
+    _currentItem = widget.existingItem;
 
-    _currentItem = widget.item;
+    // Determine if we have summary data
+    _hasSummaryData = _currentItem?.analysisResult?['summary'] != null;
 
-    // Initialize controllers
-    _descriptionController = TextEditingController(text: widget.item?.userDescription ?? '');
-    _searchDescriptionController = TextEditingController(text: widget.item?.searchDescription ?? '');
-    _lengthController = TextEditingController(text: widget.item?.length ?? '');
-    _widthController = TextEditingController(text: widget.item?.width ?? '');
-    _heightController = TextEditingController(text: widget.item?.height ?? '');
-    _weightController = TextEditingController(text: widget.item?.weight ?? '');
-    _quantityController = TextEditingController(text: widget.item?.quantity.toString() ?? '1');
+    // NEW: Check if we have enhanced summary data
+    bool hasEnhancedSummary = _currentItem?.hasTargetedSearchResults == true;
 
-    if (widget.item != null) {
-      _images = List.from(widget.item!.images);
+    // Initialize tab controller - add enhanced summary tab if available
+    int tabCount = _hasSummaryData ? 4 : 3;
+    if (hasEnhancedSummary) tabCount = 5; // Add enhanced summary tab
+
+    _tabController = TabController(length: tabCount, vsync: this);
+
+    _initializeControllers();
+    _loadExistingData();
+
+    // NEW: Start OCR if item exists but OCR not completed
+    if (_currentItem != null && !_currentItem!.ocrCompleted && _currentItem!.images.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _startOCRProcessing();
+      });
     }
-
-    // Start OCR if item exists but OCR not completed
-    if (widget.item != null && !widget.item!.ocrCompleted && widget.item!.images.isNotEmpty) {
-      _startOCRProcessing();
-    }
   }
 
-  @override
-  void dispose() {
-    _tabController.dispose();
-    _descriptionController.dispose();
-    _searchDescriptionController.dispose();
-    _lengthController.dispose();
-    _widthController.dispose();
-    _heightController.dispose();
-    _weightController.dispose();
-    _quantityController.dispose();
-    super.dispose();
+  void _initializeControllers() {
+    // Basic form controllers
+    _userDescriptionController = TextEditingController();
+    _searchDescriptionController = TextEditingController();
+    _lengthController = TextEditingController();
+    _widthController = TextEditingController();
+    _heightController = TextEditingController();
+    _weightController = TextEditingController();
+    _quantityController = TextEditingController(text: '1');
+
+    // Summary controllers (if editing existing summary)
+    _titleController = TextEditingController();
+    _descriptionSummaryController = TextEditingController();
+    _estimatedValueController = TextEditingController(text: '0.00');
+
+    // Add listeners for unsaved changes
+    _userDescriptionController.addListener(_onTextChanged);
+    _searchDescriptionController.addListener(_onTextChanged);
+    _quantityController.addListener(_onTextChanged);
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.item == null ? 'Add Item' : 'Edit Item'),
-        actions: [
-          if (widget.item == null || !_hasUnsavedChanges())
-            IconButton(
-              onPressed: _isSaving ? null : _saveItem,
-              icon: _isSaving
-                  ? SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-                  : Icon(Icons.save),
-            )
-          else
-            IconButton(
-              onPressed: _saveChanges,
-              icon: Icon(Icons.save, color: Colors.orange),
-            ),
-        ],
-        bottom: TabBar(
-          controller: _tabController,
-          tabs: [
-            Tab(text: 'Details', icon: Icon(Icons.info)),
-            Tab(text: 'Images', icon: Icon(Icons.photo_library)),
-            Tab(text: 'Summary', icon: Icon(Icons.summarize)),
-          ],
-        ),
-      ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          _buildDetailsTab(),
-          _buildImagesTab(),
-          _buildSummaryTab(),
-        ],
-      ),
-    );
-  }
+  void _loadExistingData() {
+    if (!_isEditMode || _currentItem == null) return;
 
-  Widget _buildDetailsTab() {
-    return SingleChildScrollView(
-      padding: EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Basic Info Card
-          Card(
-            child: Padding(
-              padding: EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Basic Information',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  SizedBox(height: 16),
+    final item = _currentItem!;
 
-                  TextField(
-                    controller: _descriptionController,
-                    decoration: InputDecoration(
-                      labelText: 'Item Description *',
-                      hintText: 'Brief description of the item',
-                      border: OutlineInputBorder(),
-                    ),
-                    maxLines: 2,
-                  ),
-                  SizedBox(height: 16),
+    // Load basic item data
+    _userDescriptionController.text = item.userDescription;
+    _searchDescriptionController.text = item.searchDescription;
+    _lengthController.text = item.length ?? '';
+    _widthController.text = item.width ?? '';
+    _heightController.text = item.height ?? '';
+    _weightController.text = item.weight ?? '';
+    _quantityController.text = item.quantity.toString();
 
-                  TextField(
-                    controller: _searchDescriptionController,
-                    decoration: InputDecoration(
-                      labelText: 'Search Keywords',
-                      hintText: 'Keywords to help with product search',
-                      border: OutlineInputBorder(),
-                      helperText: 'Brand, model, specific features, etc.',
-                    ),
-                    maxLines: 2,
-                  ),
-                  SizedBox(height: 16),
-
-                  TextField(
-                    controller: _quantityController,
-                    decoration: InputDecoration(
-                      labelText: 'Quantity',
-                      border: OutlineInputBorder(),
-                    ),
-                    keyboardType: TextInputType.number,
-                  ),
-                ],
-              ),
-            ),
-          ),
-
-          SizedBox(height: 16),
-
-          // Measurements Card
-          Card(
-            child: Padding(
-              padding: EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Measurements (Optional)',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  SizedBox(height: 16),
-
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _lengthController,
-                          decoration: InputDecoration(
-                            labelText: 'Length',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                      ),
-                      SizedBox(width: 12),
-                      Expanded(
-                        child: TextField(
-                          controller: _widthController,
-                          decoration: InputDecoration(
-                            labelText: 'Width',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  SizedBox(height: 16),
-
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _heightController,
-                          decoration: InputDecoration(
-                            labelText: 'Height',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                      ),
-                      SizedBox(width: 12),
-                      Expanded(
-                        child: TextField(
-                          controller: _weightController,
-                          decoration: InputDecoration(
-                            labelText: 'Weight',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-
-          SizedBox(height: 16),
-
-          // OCR Status Card
-          if (widget.item != null) _buildOCRStatusCard(),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildOCRStatusCard() {
-    return Card(
-      child: Padding(
-        padding: EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  _currentItem?.ocrCompleted == true ? Icons.check_circle : Icons.hourglass_empty,
-                  color: _currentItem?.ocrCompleted == true ? Colors.green : Colors.orange,
-                ),
-                SizedBox(width: 8),
-                Text(
-                  'OCR Text Extraction',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                Spacer(),
-                if (_isProcessingOCR)
-                  SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-              ],
-            ),
-            SizedBox(height: 12),
-
-            Text(
-              _currentItem?.ocrCompleted == true
-                  ? 'Text extraction completed successfully'
-                  : _isProcessingOCR
-                  ? 'Processing images for text extraction...'
-                  : 'Text extraction pending',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-
-            if (_currentItem?.ocrCompleted == true && _currentItem?.ocrResults != null) ...[
-              SizedBox(height: 12),
-              Text(
-                OCRService.getOCRSummary(_currentItem!),
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
-
-            SizedBox(height: 12),
-
-            Row(
-              children: [
-                if (_currentItem?.ocrCompleted != true && !_isProcessingOCR)
-                  ElevatedButton.icon(
-                    onPressed: _images.isNotEmpty ? _startOCRProcessing : null,
-                    icon: Icon(Icons.play_arrow),
-                    label: Text('Start OCR'),
-                  ),
-
-                if (_currentItem?.ocrCompleted == true)
-                  OutlinedButton.icon(
-                    onPressed: _retryOCR,
-                    icon: Icon(Icons.refresh),
-                    label: Text('Retry OCR'),
-                  ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildImagesTab() {
-    return Padding(
-      padding: EdgeInsets.all(16),
-      child: Column(
-        children: [
-          // Add Image Buttons
-          Row(
-            children: [
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: () => _addImage(ImageSource.camera),
-                  icon: Icon(Icons.camera_alt),
-                  label: Text('Take Photo'),
-                ),
-              ),
-              SizedBox(width: 12),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () => _addImage(ImageSource.gallery),
-                  icon: Icon(Icons.photo_library),
-                  label: Text('From Gallery'),
-                ),
-              ),
-            ],
-          ),
-
-          SizedBox(height: 16),
-
-          // Images Grid
-          Expanded(
-            child: _images.isEmpty
-                ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.photo_library, size: 64, color: Colors.grey),
-                  SizedBox(height: 16),
-                  Text(
-                    'No images added yet',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  SizedBox(height: 8),
-                  Text(
-                    'Add photos to enable OCR text extraction',
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
-                ],
-              ),
-            )
-                : GridView.builder(
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                crossAxisSpacing: 12,
-                mainAxisSpacing: 12,
-              ),
-              itemCount: _images.length,
-              itemBuilder: (context, index) => _buildImageCard(index),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildImageCard(int index) {
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          Image.file(
-            File(_images[index]),
-            fit: BoxFit.cover,
-            errorBuilder: (context, error, stackTrace) => Container(
-              color: Colors.grey[300],
-              child: Icon(Icons.error, color: Colors.red),
-            ),
-          ),
-          Positioned(
-            top: 8,
-            right: 8,
-            child: CircleAvatar(
-              radius: 16,
-              backgroundColor: Colors.black54,
-              child: IconButton(
-                onPressed: () => _removeImage(index),
-                icon: Icon(Icons.close, color: Colors.white, size: 16),
-                padding: EdgeInsets.zero,
-              ),
-            ),
-          ),
-          Positioned(
-            bottom: 8,
-            left: 8,
-            child: Container(
-              padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                'Image ${index + 1}',
-                style: TextStyle(color: Colors.white, fontSize: 12),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSummaryTab() {
-    if (_currentItem == null) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.save, size: 64, color: Colors.grey),
-            SizedBox(height: 16),
-            Text(
-              'Save item first',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            SizedBox(height: 8),
-            Text(
-              'Save the item to access enhanced analysis features',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-          ],
-        ),
-      );
-    }
-
-    return EnhancedSummaryTab(
-      item: _currentItem!,
-      onItemUpdated: (updatedItem) {
-        setState(() {
-          _currentItem = updatedItem;
-        });
-      },
-    );
-  }
-
-  // Image Management
-  Future<void> _addImage(ImageSource source) async {
-    try {
-      final XFile? image = await _picker.pickImage(
-        source: source,
-        maxWidth: 1920,
-        maxHeight: 1920,
-        imageQuality: 85,
-      );
-
-      if (image != null) {
-        // Copy image to app's document directory
-        final appDir = await getApplicationDocumentsDirectory();
-        final fileName = '${DateTime.now().millisecondsSinceEpoch}.jpg';
-        final savedImage = await File(image.path).copy('${appDir.path}/$fileName');
-
-        setState(() {
-          _images.add(savedImage.path);
-        });
-
-        // If item exists, update it immediately
-        if (_currentItem != null) {
-          final updatedItem = _currentItem!.copyWith(
-            images: _images,
-            ocrCompleted: false, // Reset OCR status when new images added
-          );
-          await StorageService.saveJob(updatedItem);
-          setState(() {
-            _currentItem = updatedItem;
+    // Load existing images with classifications
+    if (item.imageClassification != null) {
+      for (var entry in item.imageClassification!.entries) {
+        final label = entry.key;
+        final imagePaths = entry.value;
+        for (var imagePath in imagePaths) {
+          _labeledImages.add({
+            'imagePath': imagePath,
+            'label': label,
           });
-
-          // Start OCR processing for the new image
-          _startOCRProcessing();
         }
       }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error adding image: $e')),
-      );
+    } else {
+      // Fallback: load images without classifications
+      for (var imagePath in item.images) {
+        _labeledImages.add({
+          'imagePath': imagePath,
+          'label': 'sales', // Default label
+        });
+      }
+    }
+
+    // Load summary data if available
+    if (_hasSummaryData) {
+      final summary = item.analysisResult!['summary'] as Map<String, dynamic>;
+      final pricing = item.analysisResult!['pricing'] as Map<String, dynamic>?;
+
+      _titleController.text = summary['itemTitle'] ?? item.userDescription;
+      _descriptionSummaryController.text = summary['description'] ?? '';
+      _estimatedValueController.text = pricing?['estimatedValue']?.toStringAsFixed(2) ?? '0.00';
+
+      // Load specifications
+      final specs = summary['specifications'] as List? ?? [];
+      for (int i = 0; i < specs.length; i++) {
+        _specControllers.add(TextEditingController(text: specs[i]));
+      }
+
+      // Load features
+      final features = summary['keyFeatures'] as List? ?? [];
+      for (int i = 0; i < features.length; i++) {
+        _featureControllers.add(TextEditingController(text: features[i]));
+      }
+    }
+
+    setState(() {});
+  }
+
+  void _onTextChanged() {
+    if (!_hasUnsavedChanges) {
+      setState(() {
+        _hasUnsavedChanges = true;
+      });
     }
   }
 
-  void _removeImage(int index) {
-    setState(() {
-      _images.removeAt(index);
-    });
-
-    // If item exists, update it immediately
-    if (_currentItem != null) {
-      _saveChanges();
+  Color _getLabelColor(String label) {
+    switch (label) {
+      case 'sales':
+        return Colors.green;
+      case 'id':
+        return Colors.blue;
+      case 'markings':
+        return Colors.orange;
+      case 'packaging':
+        return Colors.purple;
+      case 'barcode':
+        return Colors.red;
+      default:
+        return Colors.grey;
     }
   }
 
-  // OCR Processing
+  // NEW: OCR Processing
   Future<void> _startOCRProcessing() async {
-    if (_images.isEmpty || _isProcessingOCR) return;
+    if (_labeledImages.isEmpty || _isProcessingOCR) return;
 
     setState(() {
       _isProcessingOCR = true;
@@ -564,152 +238,2013 @@ class _ItemScreenState extends State<ItemScreen> with TickerProviderStateMixin {
     }
   }
 
-  Future<void> _retryOCR() async {
-    if (_currentItem != null) {
-      // Reset OCR status
-      final updatedItem = _currentItem!.copyWith(
-        ocrCompleted: false,
-        ocrResults: null,
-        imageClassification: null,
+  // NEW: Individual image OCR analysis
+  Future<void> _analyzeIndividualImage(String imagePath) async {
+    try {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Analyzing image with OCR...'),
+            ],
+          ),
+        ),
       );
+
+      // Extract text from this specific image
+      final extractedText = await OCRService.extractTextFromImage(imagePath);
+
+      Navigator.of(context).pop(); // Close loading dialog
+
+      // Show results
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('OCR Analysis Results'),
+          content: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Extracted Text:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                SizedBox(height: 8),
+                Text(extractedText.isEmpty ? 'No text found' : extractedText),
+                SizedBox(height: 16),
+
+                if (extractedText.isNotEmpty) ...[
+                  Text(
+                    'Structured Data:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  SizedBox(height: 8),
+                  ...OCRService.extractStructuredData(extractedText).entries.map(
+                        (entry) => entry.value.isNotEmpty
+                        ? Padding(
+                      padding: EdgeInsets.only(bottom: 4),
+                      child: Text('${entry.key}: ${entry.value.join(', ')}'),
+                    )
+                        : SizedBox.shrink(),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Close'),
+            ),
+          ],
+        ),
+      );
+
+    } catch (e) {
+      Navigator.of(context).pop(); // Close loading dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('OCR analysis failed: $e')),
+      );
+    }
+  }
+
+  Future<void> _captureImage() async {
+    final picker = ImagePicker();
+    final pickedFile = await picker.pickImage(source: ImageSource.camera);
+
+    if (pickedFile != null) {
+      final result = await Navigator.push<Map<String, dynamic>>(
+        context,
+        MaterialPageRoute(
+          builder: (context) => ImageProcessingScreen(
+            imagePath: pickedFile.path,
+            currentLabel: 'sales',
+          ),
+        ),
+      );
+
+      if (result != null) {
+        setState(() {
+          _labeledImages.add({
+            'imagePath': result['imagePath'],
+            'label': result['label'],
+          });
+          _hasUnsavedChanges = true;
+        });
+
+        // NEW: Start OCR processing for new image if item exists
+        if (_currentItem != null) {
+          await _updateItemImagesAndStartOCR();
+        }
+      }
+    }
+  }
+
+  // NEW: Update item with new images and start OCR
+  Future<void> _updateItemImagesAndStartOCR() async {
+    if (_currentItem == null) return;
+
+    try {
+      // Create image classification map
+      Map<String, List<String>> imageClassification = {};
+      for (var img in _labeledImages) {
+        final label = img['label']!;
+        final imagePath = img['imagePath']!;
+
+        if (!imageClassification.containsKey(label)) {
+          imageClassification[label] = [];
+        }
+        imageClassification[label]!.add(imagePath);
+      }
+
+      final updatedItem = _currentItem!.copyWith(
+        images: _labeledImages.map((img) => img['imagePath']!).toList(),
+        imageClassification: imageClassification,
+        ocrCompleted: false, // Reset OCR status when new images added
+      );
+
       await StorageService.saveJob(updatedItem);
       setState(() {
         _currentItem = updatedItem;
       });
 
-      // Start OCR again
+      // Start OCR processing
       _startOCRProcessing();
+
+    } catch (e) {
+      print('Error updating item with new images: $e');
     }
   }
 
-  // Save Operations
-  Future<void> _saveItem() async {
-    if (_descriptionController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Please enter an item description')),
-      );
-      return;
-    }
+  Future<void> _editImageClassification(int index) async {
+    final currentImage = _labeledImages[index];
+    final result = await Navigator.push<Map<String, dynamic>>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ImageProcessingScreen(
+          imagePath: currentImage['imagePath']!,
+          currentLabel: currentImage['label'],
+        ),
+      ),
+    );
 
-    if (_images.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Please add at least one image')),
-      );
-      return;
-    }
-
-    setState(() => _isSaving = true);
-
-    try {
-      final newItem = ItemJob(
-        id: const Uuid().v4(),
-        userDescription: _descriptionController.text.trim(),
-        searchDescription: _searchDescriptionController.text.trim(),
-        length: _lengthController.text.trim().isEmpty ? null : _lengthController.text.trim(),
-        width: _widthController.text.trim().isEmpty ? null : _widthController.text.trim(),
-        height: _heightController.text.trim().isEmpty ? null : _heightController.text.trim(),
-        weight: _weightController.text.trim().isEmpty ? null : _weightController.text.trim(),
-        quantity: int.tryParse(_quantityController.text) ?? 1,
-        images: _images,
-        createdAt: DateTime.now(),
-      );
-
-      await StorageService.saveJob(newItem);
-
+    if (result != null) {
       setState(() {
-        _currentItem = newItem;
+        _labeledImages[index] = {
+          'imagePath': result['imagePath'],
+          'label': result['label'],
+        };
+        _hasUnsavedChanges = true;
       });
+    }
+  }
 
-      print('✅ Item saved: ${newItem.id}');
+  void _removeImage(int index) {
+    setState(() {
+      _labeledImages.removeAt(index);
+      _hasUnsavedChanges = true;
+    });
+  }
 
+  Future<void> _runPackagingSearch() async {
+    final packagingImages = _labeledImages
+        .where((img) => img['label'] == 'packaging')
+        .map((img) => img['imagePath'] as String)
+        .toList();
+
+    if (packagingImages.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('✅ Item saved successfully!'),
-          backgroundColor: Colors.green,
+          content: Text('No packaging images available'),
+          backgroundColor: Colors.orange,
         ),
       );
+      return;
+    }
 
-      // Start OCR processing in background
-      _startOCRProcessing();
+    // Show loading indicator
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Text('Analyzing packaging images...'),
+          ],
+        ),
+      ),
+    );
 
-      // Navigate back if this was a new item
-      if (widget.item == null) {
-        Navigator.of(context).pop(newItem);
+    try {
+      final results = await CloudServices.searchPackaging(packagingImages);
+      Navigator.pop(context); // Close loading dialog
+      _showSearchResults('Packaging Analysis', results);
+    } catch (e) {
+      Navigator.pop(context); // Close loading dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error analyzing packaging: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _runMarkingsSearch() async {
+    final markingImages = _labeledImages
+        .where((img) => img['label'] == 'markings')
+        .map((img) => img['imagePath'] as String)
+        .toList();
+
+    if (markingImages.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No marking images available'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    // Show loading indicator
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Text('Analyzing markings...'),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final results = await CloudServices.searchMarkings(markingImages);
+      Navigator.pop(context); // Close loading dialog
+
+      // Enhance markings results with search candidates
+      if (results['brands'] != null && (results['brands'] as List).isNotEmpty) {
+        List<Map<String, dynamic>> candidates = [];
+
+        for (String brand in (results['brands'] as List).take(3)) {
+          candidates.add({
+            'title': 'Search eBay for $brand products',
+            'url': 'https://www.ebay.com/sch/i.html?_nkw=${Uri.encodeComponent(brand)}',
+            'confidence': 0.7,
+            'type': 'brand_search',
+            'site': 'eBay',
+            'searchTerm': brand,
+          });
+        }
+
+        results['candidates'] = candidates;
+      }
+
+      _showSearchResults('Markings Analysis', results);
+    } catch (e) {
+      Navigator.pop(context); // Close loading dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error analyzing markings: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _runReverseImageSearch() async {
+    final idImages = _labeledImages
+        .where((img) => img['label'] == 'id')
+        .map((img) => img['imagePath'] as String)
+        .toList();
+
+    if (idImages.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No ID images available'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    // Show loading indicator
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Text('Searching with image recognition...'),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final results = await CloudServices.reverseImageSearchWithCandidates(idImages);
+      Navigator.pop(context); // Close loading dialog
+      _showSearchResults('Reverse Image Search', results);
+    } catch (e) {
+      Navigator.pop(context); // Close loading dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error in reverse search: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _runBarcodeSearch() async {
+    final barcodeImages = _labeledImages
+        .where((img) => img['label'] == 'barcode')
+        .map((img) => img['imagePath'] as String)
+        .toList();
+
+    if (barcodeImages.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No barcode images available'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    // Show loading indicator
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Text('Scanning barcodes...'),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final barcodeResults = await CloudServices.detectBarcodesAndUPCs(barcodeImages);
+      Navigator.pop(context); // Close loading dialog
+
+      List<Map<String, dynamic>> candidates = [];
+
+      // Create candidates from detected barcodes
+      final allCodes = [...barcodeResults['barcodes']!, ...barcodeResults['upcs']!];
+
+      for (String code in allCodes.take(5)) {
+        candidates.add({
+          'title': 'UPC Database: $code',
+          'url': 'https://www.upcitemdb.com/upc/$code',
+          'confidence': 0.9,
+          'type': 'barcode_lookup',
+          'site': 'UPC Database',
+          'searchTerm': code,
+        });
+
+        candidates.add({
+          'title': 'eBay Search: $code',
+          'url': 'https://www.ebay.com/sch/i.html?_nkw=${Uri.encodeComponent(code)}',
+          'confidence': 0.8,
+          'type': 'barcode_search',
+          'site': 'eBay',
+          'searchTerm': code,
+        });
+      }
+
+      final results = {
+        'confidence': allCodes.isNotEmpty ? 0.9 : 0.1,
+        'barcodes': barcodeResults['barcodes'],
+        'upcs': barcodeResults['upcs'],
+        'candidates': candidates,
+        'text': 'Found ${allCodes.length} barcodes/UPCs',
+      };
+
+      _showSearchResults('Barcode Scan Results', results);
+    } catch (e) {
+      Navigator.pop(context); // Close loading dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error scanning barcodes: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  void _showSearchResults(String title, Map<String, dynamic> results) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        builder: (context, scrollController) => Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: Column(
+            children: [
+              // Handle bar
+              Container(
+                margin: EdgeInsets.symmetric(vertical: 12),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+
+              // Header
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 20),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          Text(
+                            'Confidence: ${(results['confidence'] * 100).toInt()}% • Found ${(results['candidates'] as List?)?.length ?? 0} candidates',
+                            style: TextStyle(
+                              color: Colors.grey[600],
+                              fontSize: 14,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(context),
+                      icon: Icon(Icons.close),
+                    ),
+                  ],
+                ),
+              ),
+
+              Divider(),
+
+              // Content
+              Expanded(
+                child: SingleChildScrollView(
+                  controller: scrollController,
+                  padding: EdgeInsets.all(20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Extracted data summary
+                      if (results['text'] != null && results['text'].toString().isNotEmpty) ...[
+                        _buildSectionHeader('Extracted Text', Icons.text_fields),
+                        Card(
+                          child: Padding(
+                            padding: EdgeInsets.all(12),
+                            child: Text(
+                              results['text'].toString().length > 200
+                                  ? '${results['text'].toString().substring(0, 200)}...'
+                                  : results['text'].toString(),
+                              style: TextStyle(fontSize: 13),
+                            ),
+                          ),
+                        ),
+                        SizedBox(height: 20),
+                      ],
+
+                      // Products found
+                      if (results['products'] != null && (results['products'] as List).isNotEmpty) ...[
+                        _buildSectionHeader('Products Identified', Icons.inventory),
+                        ...List.generate(
+                          (results['products'] as List).length,
+                              (index) => Card(
+                            child: ListTile(
+                              leading: Icon(Icons.check_circle, color: Colors.green),
+                              title: Text(results['products'][index]),
+                              dense: true,
+                            ),
+                          ),
+                        ),
+                        SizedBox(height: 20),
+                      ],
+
+                      // Candidate sources with USE buttons
+                      if (results['candidates'] != null && (results['candidates'] as List).isNotEmpty) ...[
+                        _buildSectionHeader('Web Sources to Review', Icons.public),
+                        ...List.generate(
+                          (results['candidates'] as List).length,
+                              (index) => _buildCandidateCard(
+                            (results['candidates'] as List)[index],
+                            context,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSectionHeader(String title, IconData icon) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: Colors.blue[700]),
+          SizedBox(width: 8),
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: Colors.blue[700],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCandidateCard(Map<String, dynamic> candidate, BuildContext context) {
+    final confidence = candidate['confidence'] ?? 0.0;
+    final title = candidate['title'] ?? 'Unknown Source';
+    final site = candidate['site'] ?? 'Unknown';
+    final type = candidate['type'] ?? 'unknown';
+    final url = candidate['url'] ?? '';
+
+    Color confidenceColor = confidence > 0.7 ? Colors.green :
+    confidence > 0.4 ? Colors.orange : Colors.red;
+
+    IconData typeIcon;
+    Color cardColor;
+
+    switch (type) {
+      case 'product_page':
+        typeIcon = Icons.shopping_bag;
+        cardColor = Colors.blue;
+        break;
+      case 'barcode_lookup':
+        typeIcon = Icons.qr_code;
+        cardColor = Colors.green;
+        break;
+      case 'brand_model_search':
+        typeIcon = Icons.search;
+        cardColor = Colors.purple;
+        break;
+      case 'similar_image':
+        typeIcon = Icons.image;
+        cardColor = Colors.orange;
+        break;
+      default:
+        typeIcon = Icons.link;
+        cardColor = Colors.grey;
+    }
+
+    return Card(
+      margin: EdgeInsets.only(bottom: 12),
+      elevation: 2,
+      child: Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: cardColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: cardColor.withOpacity(0.3)),
+                  ),
+                  child: Icon(typeIcon, size: 20, color: cardColor),
+                ),
+                SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 15,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Container(
+                            padding: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: confidenceColor.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: confidenceColor.withOpacity(0.3)),
+                            ),
+                            child: Text(
+                              '${(confidence * 100).toInt()}%',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: confidenceColor,
+                              ),
+                            ),
+                          ),
+                          SizedBox(width: 8),
+                          Container(
+                            padding: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.grey[100],
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              site,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey[700],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+
+            SizedBox(height: 12),
+
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(context); // Close the modal first
+                      _openWebScraper(url, title);
+                    },
+                    icon: Icon(Icons.public, size: 16),
+                    label: Text('VIEW SITE'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.blue[700],
+                      side: BorderSide(color: Colors.blue[300]!),
+                    ),
+                  ),
+                ),
+                SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(context); // Close the modal first
+                      _openWebScraperWithAutoScrape(url, title);
+                    },
+                    icon: Icon(Icons.download, size: 16),
+                    label: Text('USE DATA'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green[600],
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _openWebScraper(String url, String title) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => WebScraperScreen(
+          url: url,
+          title: title,
+          onDataScrapped: (scrapedData) {
+            _addScrapedData(scrapedData);
+          },
+        ),
+      ),
+    );
+  }
+
+  void _openWebScraperWithAutoScrape(String url, String title) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => WebScraperScreen(
+          url: url,
+          title: title,
+          onDataScrapped: (scrapedData) {
+            _addScrapedData(scrapedData);
+          },
+        ),
+      ),
+    );
+  }
+
+  void _addScrapedData(Map<String, dynamic> scrapedData) {
+    if (_currentItem == null) return;
+
+    // Add scraped data to item's analysis result
+    Map<String, dynamic> updatedAnalysisResult = Map.from(_currentItem!.analysisResult ?? {});
+
+    if (!updatedAnalysisResult.containsKey('scrapedSources')) {
+      updatedAnalysisResult['scrapedSources'] = [];
+    }
+
+    updatedAnalysisResult['scrapedSources'].add({
+      'timestamp': DateTime.now().toIso8601String(),
+      'data': scrapedData,
+    });
+
+    final updatedItem = _currentItem!.copyWith(analysisResult: updatedAnalysisResult);
+    StorageService.saveJob(updatedItem);
+
+    setState(() {
+      _currentItem = updatedItem;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('✅ Data scraped: ${scrapedData['title'] ?? 'Unknown source'}'),
+        backgroundColor: Colors.green,
+        action: SnackBarAction(
+          label: 'VIEW',
+          textColor: Colors.white,
+          onPressed: () {
+            _showScrapedDataSummary(scrapedData);
+          },
+        ),
+      ),
+    );
+  }
+
+  void _showScrapedDataSummary(Map<String, dynamic> data) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Scraped Data Summary'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (data['title'] != null) ...[
+                Text('Title:', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text(data['title']),
+                SizedBox(height: 8),
+              ],
+              if (data['prices'] != null && (data['prices'] as List).isNotEmpty) ...[
+                Text('Prices Found:', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text('${(data['prices'] as List).length} prices'),
+                SizedBox(height: 8),
+              ],
+              if (data['specifications'] != null && (data['specifications'] as List).isNotEmpty) ...[
+                Text('Specifications:', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text('${(data['specifications'] as List).length} specs'),
+                SizedBox(height: 8),
+              ],
+              if (data['dataQuality'] != null) ...[
+                Text('Data Quality:', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text(data['dataQuality']['overallQuality'] ?? 'Unknown'),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _saveItem() async {
+    if (!_formKey.currentState!.validate() || _labeledImages.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Please fill all fields and add at least one image')),
+      );
+      return;
+    }
+
+    setState(() {
+      _isProcessing = true;
+    });
+
+    try {
+      // Create image classification map
+      Map<String, List<String>> imageClassification = {};
+      for (var img in _labeledImages) {
+        final label = img['label']!;
+        final imagePath = img['imagePath']!;
+
+        if (!imageClassification.containsKey(label)) {
+          imageClassification[label] = [];
+        }
+        imageClassification[label]!.add(imagePath);
+      }
+
+      ItemJob item;
+
+      if (_isEditMode && _currentItem != null) {
+        // Update existing item
+        Map<String, dynamic>? updatedAnalysisResult;
+
+        // Update summary if we have summary data
+        if (_hasSummaryData) {
+          updatedAnalysisResult = Map<String, dynamic>.from(_currentItem!.analysisResult ?? {});
+
+          final updatedSummary = {
+            ...updatedAnalysisResult['summary'] ?? {},
+            'itemTitle': _titleController.text.trim(),
+            'description': _descriptionSummaryController.text.trim(),
+            'specifications': _specControllers.map((c) => c.text.trim()).where((s) => s.isNotEmpty).toList(),
+            'keyFeatures': _featureControllers.map((c) => c.text.trim()).where((f) => f.isNotEmpty).toList(),
+            'lastEditedAt': DateTime.now().toIso8601String(),
+            'userEdited': true,
+          };
+
+          final updatedPricing = {
+            ...updatedAnalysisResult['pricing'] ?? {},
+            'estimatedValue': double.tryParse(_estimatedValueController.text) ?? 0.0,
+            'lastEditedAt': DateTime.now().toIso8601String(),
+            'userEdited': true,
+          };
+
+          updatedAnalysisResult['summary'] = updatedSummary;
+          updatedAnalysisResult['pricing'] = updatedPricing;
+        }
+
+        item = _currentItem!.copyWith(
+          userDescription: _userDescriptionController.text.trim(),
+          searchDescription: _searchDescriptionController.text.trim(),
+          length: _lengthController.text.trim().isEmpty ? null : _lengthController.text.trim(),
+          width: _widthController.text.trim().isEmpty ? null : _widthController.text.trim(),
+          height: _heightController.text.trim().isEmpty ? null : _heightController.text.trim(),
+          weight: _weightController.text.trim().isEmpty ? null : _weightController.text.trim(),
+          quantity: int.tryParse(_quantityController.text.trim()) ?? 1,
+          images: _labeledImages.map((img) => img['imagePath']!).toList(),
+          imageClassification: imageClassification,
+          analysisResult: updatedAnalysisResult,
+        );
+      } else {
+        // Create new item
+        item = Itemjob(
+          id: Uuid().v4(),
+          userDescription: _userDescriptionController.text.trim(),
+          searchDescription: _searchDescriptionController.text.trim(),
+          length: _lengthController.text.trim().isEmpty ? null : _lengthController.text.trim(),
+          width: _widthController.text.trim().isEmpty ? null : _widthController.text.trim(),
+          height: _heightController.text.trim().isEmpty ? null : _heightController.text.trim(),
+          weight: _weightController.text.trim().isEmpty ? null : _weightController.text.trim(),
+          quantity: int.tryParse(_quantityController.text.trim()) ?? 1,
+          images: _labeledImages.map((img) => img['imagePath']!).toList(),
+          createdAt: DateTime.now(),
+          imageClassification: imageClassification,
+        );
+      }
+
+      await StorageService.saveJob(item);
+
+      setState(() {
+        _hasUnsavedChanges = false;
+        _currentItem = item;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_isEditMode ? 'Item updated successfully' : 'Item created successfully')),
+      );
+
+      // NEW: Start OCR processing after saving
+      if (!_isEditMode || !item.ocrCompleted) {
+        _startOCRProcessing();
+      }
+
+      // Navigate to analysis results if this is a new item
+      if (!_isEditMode) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => AnalysisResultsScreen(item: item),
+          ),
+        );
       }
 
     } catch (e) {
-      print('❌ Error saving item: $e');
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error saving item: $e'),
-          backgroundColor: Colors.red,
-        ),
+        SnackBar(content: Text('Error saving item: $e')),
       );
     } finally {
-      setState(() => _isSaving = false);
+      setState(() {
+        _isProcessing = false;
+      });
     }
   }
 
-  Future<void> _saveChanges() async {
+  Future<void> _regenerateSummary() async {
     if (_currentItem == null) return;
 
-    setState(() => _isSaving = true);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Regenerate Summary'),
+        content: Text('This will regenerate the summary from source data. Continue?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Regenerate'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    setState(() => _isProcessing = true);
 
     try {
-      final updatedItem = _currentItem!.copyWith(
-        userDescription: _descriptionController.text.trim(),
-        searchDescription: _searchDescriptionController.text.trim(),
-        length: _lengthController.text.trim().isEmpty ? null : _lengthController.text.trim(),
-        width: _widthController.text.trim().isEmpty ? null : _widthController.text.trim(),
-        height: _heightController.text.trim().isEmpty ? null : _heightController.text.trim(),
-        weight: _weightController.text.trim().isEmpty ? null : _weightController.text.trim(),
-        quantity: int.tryParse(_quantityController.text) ?? 1,
-        images: _images,
-      );
-
-      await StorageService.saveJob(updatedItem);
-
-      setState(() {
-        _currentItem = updatedItem;
-      });
-
+      // This would call the summary generation service
+      // For now, just show a message
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('✅ Changes saved!'),
-          backgroundColor: Colors.green,
-        ),
+        SnackBar(content: Text('Summary regeneration coming soon')),
       );
-
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error saving changes: $e'),
-          backgroundColor: Colors.red,
-        ),
+        SnackBar(content: Text('Error regenerating summary: $e')),
       );
     } finally {
-      setState(() => _isSaving = false);
+      setState(() => _isProcessing = false);
     }
   }
 
-  bool _hasUnsavedChanges() {
-    if (_currentItem == null) return false;
-
-    return _descriptionController.text.trim() != _currentItem!.userDescription ||
-        _searchDescriptionController.text.trim() != _currentItem!.searchDescription ||
-        _lengthController.text.trim() != (_currentItem!.length ?? '') ||
-        _widthController.text.trim() != (_currentItem!.width ?? '') ||
-        _heightController.text.trim() != (_currentItem!.height ?? '') ||
-        _weightController.text.trim() != (_currentItem!.weight ?? '') ||
-        (int.tryParse(_quantityController.text) ?? 1) != _currentItem!.quantity ||
-        !_listsEqual(_images, _currentItem!.images);
+  void _addSpecification() {
+    setState(() {
+      _specControllers.add(TextEditingController());
+      _hasUnsavedChanges = true;
+    });
   }
 
-  bool _listsEqual(List<String> a, List<String> b) {
-    if (a.length != b.length) return false;
-    for (int i = 0; i < a.length; i++) {
-      if (a[i] != b[i]) return false;
+  void _removeSpecification(int index) {
+    setState(() {
+      _specControllers[index].dispose();
+      _specControllers.removeAt(index);
+      _hasUnsavedChanges = true;
+    });
+  }
+
+  void _addFeature() {
+    setState(() {
+      _featureControllers.add(TextEditingController());
+      _hasUnsavedChanges = true;
+    });
+  }
+
+  void _removeFeature(int index) {
+    setState(() {
+      _featureControllers[index].dispose();
+      _featureControllers.removeAt(index);
+      _hasUnsavedChanges = true;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // NEW: Dynamic tab count based on available features
+    bool hasEnhancedSummary = _currentItem?.hasTargetedSearchResults == true;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_isEditMode ? 'Edit Item' : 'Add New Item'),
+        backgroundColor: Colors.blue[600],
+        foregroundColor: Colors.white,
+        actions: [
+          if (_hasUnsavedChanges)
+            TextButton(
+              onPressed: _isProcessing ? null : _saveItem,
+              child: Text('SAVE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+          if (_isEditMode && _hasSummaryData)
+            PopupMenuButton<String>(
+              onSelected: (value) {
+                if (value == 'regenerate') {
+                  _regenerateSummary();
+                } else if (value == 'retryOCR') {
+                  _startOCRProcessing();
+                }
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem(
+                  value: 'regenerate',
+                  child: Row(children: [Icon(Icons.refresh), SizedBox(width: 8), Text('Regenerate Summary')]),
+                ),
+                // NEW: OCR retry option
+                PopupMenuItem(
+                  value: 'retryOCR',
+                  child: Row(children: [Icon(Icons.text_fields), SizedBox(width: 8), Text('Retry OCR')]),
+                ),
+              ],
+            ),
+        ],
+        bottom: TabBar(
+          controller: _tabController,
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white70,
+          isScrollable: true,
+          tabs: [
+            Tab(text: 'Item Info'),
+            Tab(text: 'Images'),
+            Tab(text: 'Actions'),
+            if (_hasSummaryData) Tab(text: 'Summary'),
+            if (hasEnhancedSummary) Tab(text: 'Enhanced'), // NEW: Enhanced summary tab
+          ],
+        ),
+      ),
+      body: _isProcessing
+          ? Center(child: CircularProgressIndicator())
+          : TabBarView(
+        controller: _tabController,
+        children: [
+          _buildItemInfoTab(),
+          _buildImagesTab(),
+          _buildActionsTab(),
+          if (_hasSummaryData) _buildSummaryTab(),
+          if (hasEnhancedSummary) _buildEnhancedSummaryTab(), // NEW: Enhanced summary tab
+        ],
+      ),
+    );
+  }
+
+  // NEW: Enhanced Summary Tab
+  Widget _buildEnhancedSummaryTab() {
+    if (_currentItem == null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.save, size: 64, color: Colors.grey),
+            SizedBox(height: 16),
+            Text(
+              'Save item first',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Save the item to access enhanced analysis features',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ],
+        ),
+      );
     }
-    return true;
+
+    return EnhancedSummaryTab(
+      item: _currentItem!,
+      onItemUpdated: (updatedItem) {
+        setState(() {
+          _currentItem = updatedItem;
+        });
+      },
+    );
+  }
+
+  Widget _buildItemInfoTab() {
+    return Form(
+      key: _formKey,
+      child: SingleChildScrollView(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Item Description
+            Text('Item Description', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            SizedBox(height: 8),
+            TextFormField(
+              controller: _userDescriptionController,
+              decoration: InputDecoration(
+                hintText: 'Brief description of the item',
+                border: OutlineInputBorder(),
+              ),
+              validator: (value) => value?.trim().isEmpty == true ? 'Please enter a description' : null,
+              maxLines: 2,
+            ),
+
+            SizedBox(height: 20),
+
+            // Search Description
+            Text('Search Keywords', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            SizedBox(height: 8),
+            TextFormField(
+              controller: _searchDescriptionController,
+              decoration: InputDecoration(
+                hintText: 'Keywords to guide search (brand, model, etc.)',
+                border: OutlineInputBorder(),
+              ),
+              validator: (value) => value?.trim().isEmpty == true ? 'Please enter search keywords' : null,
+              maxLines: 2,
+            ),
+
+            SizedBox(height: 20),
+
+            // Quantity
+            Text('Quantity', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            SizedBox(height: 8),
+            TextFormField(
+              controller: _quantityController,
+              decoration: InputDecoration(hintText: '1', border: OutlineInputBorder()),
+              keyboardType: TextInputType.number,
+              validator: (value) {
+                final qty = int.tryParse(value?.trim() ?? '');
+                return (qty == null || qty < 1) ? 'Please enter a valid quantity' : null;
+              },
+            ),
+
+            SizedBox(height: 20),
+
+            // Measurements
+            Text('Measurements (Optional)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _lengthController,
+                    decoration: InputDecoration(labelText: 'Length', hintText: '12"', border: OutlineInputBorder()),
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: TextFormField(
+                    controller: _widthController,
+                    decoration: InputDecoration(labelText: 'Width', hintText: '8"', border: OutlineInputBorder()),
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _heightController,
+                    decoration: InputDecoration(labelText: 'Height', hintText: '6"', border: OutlineInputBorder()),
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: TextFormField(
+                    controller: _weightController,
+                    decoration: InputDecoration(labelText: 'Weight', hintText: '2.5 lbs', border: OutlineInputBorder()),
+                    keyboardType: TextInputType.numberWithOptions(decimal: true),
+                  ),
+                ),
+              ],
+            ),
+
+            SizedBox(height: 20),
+
+            // NEW: OCR Status Card
+            if (_currentItem != null) _buildOCRStatusCard(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // NEW: OCR Status Card
+  Widget _buildOCRStatusCard() {
+    return Card(
+      child: Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  _currentItem?.ocrCompleted == true ? Icons.check_circle : Icons.hourglass_empty,
+                  color: _currentItem?.ocrCompleted == true ? Colors.green : Colors.orange,
+                ),
+                SizedBox(width: 8),
+                Text(
+                  'OCR Text Extraction',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+                Spacer(),
+                if (_isProcessingOCR)
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+              ],
+            ),
+            SizedBox(height: 12),
+
+            Text(
+              _currentItem?.ocrCompleted == true
+                  ? 'Text extraction completed successfully'
+                  : _isProcessingOCR
+                  ? 'Processing images for text extraction...'
+                  : 'Text extraction pending',
+            ),
+
+            if (_currentItem?.ocrCompleted == true && _currentItem?.ocrResults != null) ...[
+              SizedBox(height: 12),
+              Text(
+                OCRService.getOCRSummary(_currentItem!),
+                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+              ),
+            ],
+
+            SizedBox(height: 12),
+
+            Row(
+              children: [
+                if (_currentItem?.ocrCompleted != true && !_isProcessingOCR)
+                  ElevatedButton.icon(
+                    onPressed: _labeledImages.isNotEmpty ? _startOCRProcessing : null,
+                    icon: Icon(Icons.play_arrow),
+                    label: Text('Start OCR'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+                  ),
+
+                if (_currentItem?.ocrCompleted == true) ...[
+                  OutlinedButton.icon(
+                    onPressed: _startOCRProcessing,
+                    icon: Icon(Icons.refresh),
+                    label: Text('Retry OCR'),
+                  ),
+                  SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      // Show OCR results details
+                      _showOCRDetails();
+                    },
+                    icon: Icon(Icons.visibility),
+                    label: Text('View Details'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // NEW: Show OCR details
+  void _showOCRDetails() {
+    if (_currentItem?.ocrResults == null) return;
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('OCR Extraction Results'),
+        content: Container(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Extracted Text by Image:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                SizedBox(height: 12),
+
+                ..._currentItem!.ocrResults!.entries.map((entry) {
+                  return Card(
+                    margin: EdgeInsets.only(bottom: 12),
+                    child: Padding(
+                      padding: EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            entry.key.toUpperCase(),
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.blue[700],
+                            ),
+                          ),
+                          SizedBox(height: 8),
+                          Text(
+                            entry.value.isEmpty ? 'No text found' : entry.value,
+                            style: TextStyle(fontSize: 13),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
+
+                if (_currentItem!.imageClassification != null) ...[
+                  SizedBox(height: 16),
+                  Text(
+                    'Structured Data:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  SizedBox(height: 8),
+
+                  ..._currentItem!.imageClassification!.entries.map((entry) {
+                    if (entry.value.isEmpty) return SizedBox.shrink();
+                    return Padding(
+                      padding: EdgeInsets.only(bottom: 8),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${entry.key.toUpperCase()}: ',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          Expanded(
+                            child: Text(entry.value.join(', ')),
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
+                ],
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildImagesTab() {
+    return SingleChildScrollView(
+      padding: EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Add Image Button
+          Container(
+            width: double.infinity,
+            height: 60,
+            child: OutlinedButton.icon(
+              onPressed: _captureImage,
+              icon: Icon(Icons.add_a_photo),
+              label: Text('Add Image'),
+              style: OutlinedButton.styleFrom(side: BorderSide(color: Colors.blue[600]!)),
+            ),
+          ),
+
+          SizedBox(height: 16),
+
+          if (_labeledImages.isEmpty)
+            Center(
+              child: Column(
+                children: [
+                  Icon(Icons.add_photo_alternate, size: 64, color: Colors.grey[400]),
+                  SizedBox(height: 16),
+                  Text('No images added yet', style: TextStyle(color: Colors.grey[600])),
+                ],
+              ),
+            )
+          else
+            GridView.builder(
+              shrinkWrap: true,
+              physics: NeverScrollableScrollPhysics(),
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                crossAxisSpacing: 8,
+                mainAxisSpacing: 8,
+                childAspectRatio: 1,
+              ),
+              itemCount: _labeledImages.length,
+              itemBuilder: (context, index) {
+                final imageData = _labeledImages[index];
+                final imagePath = imageData['imagePath']!;
+                final label = imageData['label']!;
+
+                return Stack(
+                  children: [
+                    GestureDetector(
+                      onTap: () => _editImageClassification(index),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: _getLabelColor(label), width: 3),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(5),
+                          child: Image.file(
+                            File(imagePath),
+                            fit: BoxFit.cover,
+                            width: double.infinity,
+                            height: double.infinity,
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Label
+                    Positioned(
+                      top: 8,
+                      left: 8,
+                      child: Container(
+                        padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: _getLabelColor(label),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          label.toUpperCase(),
+                          style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                    // Edit icon
+                    Positioned(
+                      bottom: 8,
+                      right: 8,
+                      child: Container(
+                        padding: EdgeInsets.all(4),
+                        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(4)),
+                        child: Icon(Icons.edit, color: Colors.white, size: 16),
+                      ),
+                    ),
+                    // Remove button
+                    Positioned(
+                      top: 8,
+                      right: 8,
+                      child: GestureDetector(
+                        onTap: () => _removeImage(index),
+                        child: Container(
+                          padding: EdgeInsets.all(4),
+                          decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(4)),
+                          child: Icon(Icons.close, color: Colors.white, size: 16),
+                        ),
+                      ),
+                    ),
+                    // NEW: Individual OCR button
+                    Positioned(
+                      bottom: 8,
+                      left: 8,
+                      child: GestureDetector(
+                        onTap: () => _analyzeIndividualImage(imagePath),
+                        child: Container(
+                          padding: EdgeInsets.all(4),
+                          decoration: BoxDecoration(color: Colors.blue, borderRadius: BorderRadius.circular(4)),
+                          child: Icon(Icons.text_fields, color: Colors.white, size: 16),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionsTab() {
+    return SingleChildScrollView(
+      padding: EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (_labeledImages.isEmpty)
+            Card(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    Icon(Icons.info_outline, size: 48, color: Colors.grey[400]),
+                    SizedBox(height: 16),
+                    Text(
+                      'Add images first',
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      'Search functions will be available once you add and classify images.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.grey[600]),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else ...[
+            Text(
+              'Quick Searches',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            SizedBox(height: 16),
+
+            // Search buttons grid
+            GridView.count(
+              shrinkWrap: true,
+              physics: NeverScrollableScrollPhysics(),
+              crossAxisCount: 2,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: 1.5,
+              children: [
+                _buildSearchButton(
+                  'Packaging\nSearch',
+                  Icons.inventory_2,
+                  Colors.purple,
+                  _runPackagingSearch,
+                  _labeledImages.any((img) => img['label'] == 'packaging'),
+                ),
+                _buildSearchButton(
+                  'Markings\nSearch',
+                  Icons.label,
+                  Colors.orange,
+                  _runMarkingsSearch,
+                  _labeledImages.any((img) => img['label'] == 'markings'),
+                ),
+                _buildSearchButton(
+                  'Reverse\nSearch',
+                  Icons.search,
+                  Colors.blue,
+                  _runReverseImageSearch,
+                  _labeledImages.any((img) => img['label'] == 'id'),
+                ),
+                _buildSearchButton(
+                  'Barcode\nScan',
+                  Icons.qr_code,
+                  Colors.red,
+                  _runBarcodeSearch,
+                  _labeledImages.any((img) => img['label'] == 'barcode'),
+                ),
+              ],
+            ),
+
+            SizedBox(height: 24),
+
+            // NEW: OCR Actions Section
+            Card(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Text Extraction (OCR)',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    SizedBox(height: 12),
+
+                    Row(
+                      children: [
+                        Icon(
+                          _currentItem?.ocrCompleted == true ? Icons.check_circle : Icons.pending,
+                          color: _currentItem?.ocrCompleted == true ? Colors.green : Colors.orange,
+                        ),
+                        SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _currentItem?.ocrCompleted == true
+                                ? 'Text extracted from ${_currentItem?.ocrResults?.length ?? 0} images'
+                                : 'OCR pending for ${_labeledImages.length} images',
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    SizedBox(height: 12),
+
+                    if (!(_currentItem?.ocrCompleted == true))
+                      ElevatedButton.icon(
+                        onPressed: _isProcessingOCR ? null : _startOCRProcessing,
+                        icon: _isProcessingOCR
+                            ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                            : Icon(Icons.text_fields),
+                        label: Text(_isProcessingOCR ? 'Processing...' : 'Extract Text'),
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+                      )
+                    else
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: _showOCRDetails,
+                              icon: Icon(Icons.visibility),
+                              label: Text('View Text'),
+                            ),
+                          ),
+                          SizedBox(width: 8),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: _startOCRProcessing,
+                              icon: Icon(Icons.refresh),
+                              label: Text('Re-extract'),
+                              style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
+                            ),
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            ),
+
+            SizedBox(height: 16),
+
+            // Image classification summary
+            Card(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Image Classification Summary',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    SizedBox(height: 12),
+                    ..._getImageClassificationSummary().entries.map((entry) {
+                      return Padding(
+                        padding: EdgeInsets.symmetric(vertical: 4),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 12,
+                              height: 12,
+                              decoration: BoxDecoration(
+                                color: _getLabelColor(entry.key),
+                                borderRadius: BorderRadius.circular(2),
+                              ),
+                            ),
+                            SizedBox(width: 8),
+                            Text('${entry.key.toUpperCase()}: ${entry.value} images'),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                  ],
+                ),
+              ),
+            ),
+
+            // Show scraped data if available
+            if (_currentItem?.analysisResult?['scrapedSources'] != null) ...[
+              SizedBox(height: 16),
+              Card(
+                child: Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Scraped Data Sources',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                      SizedBox(height: 8),
+                      Text(
+                        '${(_currentItem!.analysisResult!['scrapedSources'] as List).length} data sources collected',
+                        style: TextStyle(color: Colors.green[700]),
+                      ),
+                      SizedBox(height: 12),
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          // TODO: Implement analyze function
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('AI Analysis coming soon!')),
+                          );
+                        },
+                        icon: Icon(Icons.auto_awesome),
+                        label: Text('ANALYZE WITH AI'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.purple[600],
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+
+            // NEW: Enhanced Analysis Section
+            if (_currentItem?.ocrCompleted == true) ...[
+              SizedBox(height: 16),
+              Card(
+                color: Colors.green[50],
+                child: Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(Icons.auto_awesome, color: Colors.green[700]),
+                          SizedBox(width: 8),
+                          Text(
+                            'Enhanced Analysis Available',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.green[700],
+                            ),
+                          ),
+                        ],
+                      ),
+                      SizedBox(height: 8),
+                      Text(
+                        'Use extracted text and images for smart product identification',
+                        style: TextStyle(color: Colors.green[700]),
+                      ),
+                      SizedBox(height: 12),
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          // Switch to Enhanced tab
+                          if (_currentItem?.hasTargetedSearchResults == true) {
+                            _tabController.animateTo(_tabController.length - 1);
+                          } else {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Enhanced analysis feature coming soon!')),
+                            );
+                          }
+                        },
+                        icon: Icon(Icons.smart_toy),
+                        label: Text('START ENHANCED ANALYSIS'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green[600],
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ],
+
+          SizedBox(height: 24),
+
+          // Save button
+          Container(
+            width: double.infinity,
+            height: 50,
+            child: ElevatedButton(
+              onPressed: _isProcessing ? null : _saveItem,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green[600],
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              child: _isProcessing
+                  ? Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    ),
+                  ),
+                  SizedBox(width: 12),
+                  Text(_isEditMode ? 'Updating Item...' : 'Creating Item...'),
+                ],
+              )
+                  : Text(
+                _isEditMode ? 'Update Item' : 'Create Item',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummaryTab() {
+    return SingleChildScrollView(
+      padding: EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Title
+          Text('Item Title', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          SizedBox(height: 8),
+          TextFormField(
+            controller: _titleController,
+            decoration: InputDecoration(border: OutlineInputBorder()),
+            maxLines: 2,
+            onChanged: (_) => _onTextChanged(),
+          ),
+
+          SizedBox(height: 20),
+
+          // Description
+          Text('Description', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          SizedBox(height: 8),
+          TextFormField(
+            controller: _descriptionSummaryController,
+            decoration: InputDecoration(border: OutlineInputBorder()),
+            maxLines: 8,
+            onChanged: (_) => _onTextChanged(),
+          ),
+
+          SizedBox(height: 20),
+
+          // Estimated Value
+          Text('Estimated Value', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          SizedBox(height: 8),
+          TextFormField(
+            controller: _estimatedValueController,
+            decoration: InputDecoration(
+                border: OutlineInputBorder(),
+                prefixText: '\$'
+            ),
+            keyboardType: TextInputType.numberWithOptions(decimal: true),
+            onChanged: (_) => _onTextChanged(),
+          ),
+
+          SizedBox(height: 20),
+
+          // Specifications
+          Row(
+            children: [
+              Text('Specifications', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              Spacer(),
+              IconButton(onPressed: _addSpecification, icon: Icon(Icons.add)),
+            ],
+          ),
+          SizedBox(height: 8),
+
+          if (_specControllers.isEmpty)
+            Center(child: Text('No specifications yet'))
+          else
+            ...List.generate(_specControllers.length, (index) {
+              return Container(
+                margin: EdgeInsets.only(bottom: 12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _specControllers[index],
+                        decoration: InputDecoration(
+                          border: OutlineInputBorder(),
+                          prefixText: '• ',
+                        ),
+                        maxLines: 2,
+                        onChanged: (_) => _onTextChanged(),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => _removeSpecification(index),
+                      icon: Icon(Icons.remove_circle, color: Colors.red),
+                    ),
+                  ],
+                ),
+              );
+            }),
+
+          SizedBox(height: 20),
+
+          // Key Features
+          Row(
+            children: [
+              Text('Key Features', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              Spacer(),
+              IconButton(onPressed: _addFeature, icon: Icon(Icons.add)),
+            ],
+          ),
+          SizedBox(height: 8),
+
+          if (_featureControllers.isEmpty)
+            Center(child: Text('No features yet'))
+          else
+            ...List.generate(_featureControllers.length, (index) {
+              return Container(
+                margin: EdgeInsets.only(bottom: 12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _featureControllers[index],
+                        decoration: InputDecoration(
+                          border: OutlineInputBorder(),
+                          prefixText: '• ',
+                        ),
+                        maxLines: 2,
+                        onChanged: (_) => _onTextChanged(),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => _removeFeature(index),
+                      icon: Icon(Icons.remove_circle, color: Colors.red),
+                    ),
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchButton(String title, IconData icon, Color color, VoidCallback onPressed, bool hasRequiredImages) {
+    return ElevatedButton(
+      onPressed: hasRequiredImages ? onPressed : null,
+      style: ElevatedButton.styleFrom(
+        backgroundColor: hasRequiredImages ? color : Colors.grey[300],
+        foregroundColor: hasRequiredImages ? Colors.white : Colors.grey[600],
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 24),
+          SizedBox(height: 8),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Map<String, int> _getImageClassificationSummary() {
+    Map<String, int> summary = {};
+    for (var image in _labeledImages) {
+      final label = image['label']!;
+      summary[label] = (summary[label] ?? 0) + 1;
+    }
+    return summary;
+  }
+
+  void _disposeControllers() {
+    _userDescriptionController.dispose();
+    _searchDescriptionController.dispose();
+    _lengthController.dispose();
+    _widthController.dispose();
+    _heightController.dispose();
+    _weightController.dispose();
+    _quantityController.dispose();
+    _titleController.dispose();
+    _descriptionSummaryController.dispose();
+    _estimatedValueController.dispose();
+
+    for (var controller in _specControllers) {
+      controller.dispose();
+    }
+    for (var controller in _featureControllers) {
+      controller.dispose();
+    }
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    _disposeControllers();
+    super.dispose();
   }
 }
