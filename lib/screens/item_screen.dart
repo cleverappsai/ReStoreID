@@ -1,5 +1,5 @@
 // ========================================
-// lib/screens/item_screen.dart
+// lib/screens/item_screen.dart - YOUR WORKING VERSION + OCR
 // ========================================
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -8,6 +8,8 @@ import 'dart:io';
 import '../models/item_job.dart';
 import '../services/storage_service.dart';
 import '../services/cloud_services.dart';
+import '../services/ocr_service.dart'; // NEW: Added OCR service
+import '../widgets/enhanced_summary_tab.dart'; // NEW: Added enhanced summary
 import 'image_processing_screen.dart';
 import 'analysis_results_screen.dart';
 import 'web_scraper_screen.dart';
@@ -16,6 +18,11 @@ class ItemScreen extends StatefulWidget {
   final ItemJob? existingItem; // null for new item, populated for edit
 
   const ItemScreen({Key? key, this.existingItem}) : super(key: key);
+
+  // Factory constructor for compatibility with item parameter
+  factory ItemScreen.withItem({Key? key, ItemJob? item}) {
+    return ItemScreen(key: key, existingItem: item);
+  }
 
   @override
   _ItemScreenState createState() => _ItemScreenState();
@@ -46,6 +53,7 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
   bool _isEditMode = false;
   bool _hasSummaryData = false;
   bool _hasUnsavedChanges = false;
+  bool _isProcessingOCR = false; // NEW: OCR processing state
 
   // Current item data
   ItemJob? _currentItem;
@@ -59,14 +67,24 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
     // Determine if we have summary data
     _hasSummaryData = _currentItem?.analysisResult?['summary'] != null;
 
-    // Initialize tab controller - 3 tabs for new items, 4 for items with summaries
-    _tabController = TabController(
-        length: _hasSummaryData ? 4 : 3,
-        vsync: this
-    );
+    // NEW: Check if we have enhanced summary data
+    bool hasEnhancedSummary = _currentItem?.hasTargetedSearchResults == true;
+
+    // Initialize tab controller - add enhanced summary tab if available
+    int tabCount = _hasSummaryData ? 4 : 3;
+    if (hasEnhancedSummary) tabCount = 5; // Add enhanced summary tab
+
+    _tabController = TabController(length: tabCount, vsync: this);
 
     _initializeControllers();
     _loadExistingData();
+
+    // NEW: Start OCR if item exists but OCR not completed
+    if (_currentItem != null && !_currentItem!.ocrCompleted && _currentItem!.images.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _startOCRProcessing();
+      });
+    }
   }
 
   void _initializeControllers() {
@@ -176,6 +194,125 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
     }
   }
 
+  // NEW: OCR Processing
+  Future<void> _startOCRProcessing() async {
+    if (_labeledImages.isEmpty || _isProcessingOCR) return;
+
+    setState(() {
+      _isProcessingOCR = true;
+    });
+
+    try {
+      if (_currentItem != null) {
+        print('🔄 Starting OCR processing for ${_currentItem!.id}');
+
+        await OCRService.processItemImages(_currentItem!);
+
+        // Refresh the current item
+        final updatedItem = await StorageService.getJob(_currentItem!.id);
+        if (updatedItem != null) {
+          setState(() {
+            _currentItem = updatedItem;
+          });
+
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('✅ OCR processing completed!'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      print('❌ OCR processing failed: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('OCR processing failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      setState(() {
+        _isProcessingOCR = false;
+      });
+    }
+  }
+
+  // NEW: Individual image OCR analysis
+  Future<void> _analyzeIndividualImage(String imagePath) async {
+    try {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Analyzing image with OCR...'),
+            ],
+          ),
+        ),
+      );
+
+      // Extract text from this specific image
+      final extractedText = await OCRService.extractTextFromImage(imagePath);
+
+      Navigator.of(context).pop(); // Close loading dialog
+
+      // Show results
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('OCR Analysis Results'),
+          content: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Extracted Text:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                SizedBox(height: 8),
+                Text(extractedText.isEmpty ? 'No text found' : extractedText),
+                SizedBox(height: 16),
+
+                if (extractedText.isNotEmpty) ...[
+                  Text(
+                    'Structured Data:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  SizedBox(height: 8),
+                  ...OCRService.extractStructuredData(extractedText).entries.map(
+                        (entry) => entry.value.isNotEmpty
+                        ? Padding(
+                      padding: EdgeInsets.only(bottom: 4),
+                      child: Text('${entry.key}: ${entry.value.join(', ')}'),
+                    )
+                        : SizedBox.shrink(),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Close'),
+            ),
+          ],
+        ),
+      );
+
+    } catch (e) {
+      Navigator.of(context).pop(); // Close loading dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('OCR analysis failed: $e')),
+      );
+    }
+  }
+
   Future<void> _captureImage() async {
     final picker = ImagePicker();
     final pickedFile = await picker.pickImage(source: ImageSource.camera);
@@ -199,7 +336,48 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
           });
           _hasUnsavedChanges = true;
         });
+
+        // NEW: Start OCR processing for new image if item exists
+        if (_currentItem != null) {
+          await _updateItemImagesAndStartOCR();
+        }
       }
+    }
+  }
+
+  // NEW: Update item with new images and start OCR
+  Future<void> _updateItemImagesAndStartOCR() async {
+    if (_currentItem == null) return;
+
+    try {
+      // Create image classification map
+      Map<String, List<String>> imageClassification = {};
+      for (var img in _labeledImages) {
+        final label = img['label']!;
+        final imagePath = img['imagePath']!;
+
+        if (!imageClassification.containsKey(label)) {
+          imageClassification[label] = [];
+        }
+        imageClassification[label]!.add(imagePath);
+      }
+
+      final updatedItem = _currentItem!.copyWith(
+        images: _labeledImages.map((img) => img['imagePath']!).toList(),
+        imageClassification: imageClassification,
+        ocrCompleted: false, // Reset OCR status when new images added
+      );
+
+      await StorageService.saveJob(updatedItem);
+      setState(() {
+        _currentItem = updatedItem;
+      });
+
+      // Start OCR processing
+      _startOCRProcessing();
+
+    } catch (e) {
+      print('Error updating item with new images: $e');
     }
   }
 
@@ -946,7 +1124,7 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
         );
       } else {
         // Create new item
-        item = ItemJob(
+        item = Itemjob(
           id: Uuid().v4(),
           userDescription: _userDescriptionController.text.trim(),
           searchDescription: _searchDescriptionController.text.trim(),
@@ -971,6 +1149,11 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(_isEditMode ? 'Item updated successfully' : 'Item created successfully')),
       );
+
+      // NEW: Start OCR processing after saving
+      if (!_isEditMode || !item.ocrCompleted) {
+        _startOCRProcessing();
+      }
 
       // Navigate to analysis results if this is a new item
       if (!_isEditMode) {
@@ -1065,6 +1248,9 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
+    // NEW: Dynamic tab count based on available features
+    bool hasEnhancedSummary = _currentItem?.hasTargetedSearchResults == true;
+
     return Scaffold(
       appBar: AppBar(
         title: Text(_isEditMode ? 'Edit Item' : 'Add New Item'),
@@ -1081,12 +1267,19 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
               onSelected: (value) {
                 if (value == 'regenerate') {
                   _regenerateSummary();
+                } else if (value == 'retryOCR') {
+                  _startOCRProcessing();
                 }
               },
               itemBuilder: (context) => [
                 PopupMenuItem(
                   value: 'regenerate',
                   child: Row(children: [Icon(Icons.refresh), SizedBox(width: 8), Text('Regenerate Summary')]),
+                ),
+                // NEW: OCR retry option
+                PopupMenuItem(
+                  value: 'retryOCR',
+                  child: Row(children: [Icon(Icons.text_fields), SizedBox(width: 8), Text('Retry OCR')]),
                 ),
               ],
             ),
@@ -1095,11 +1288,13 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
           controller: _tabController,
           labelColor: Colors.white,
           unselectedLabelColor: Colors.white70,
+          isScrollable: true,
           tabs: [
             Tab(text: 'Item Info'),
             Tab(text: 'Images'),
             Tab(text: 'Actions'),
             if (_hasSummaryData) Tab(text: 'Summary'),
+            if (hasEnhancedSummary) Tab(text: 'Enhanced'), // NEW: Enhanced summary tab
           ],
         ),
       ),
@@ -1112,8 +1307,42 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
           _buildImagesTab(),
           _buildActionsTab(),
           if (_hasSummaryData) _buildSummaryTab(),
+          if (hasEnhancedSummary) _buildEnhancedSummaryTab(), // NEW: Enhanced summary tab
         ],
       ),
+    );
+  }
+
+  // NEW: Enhanced Summary Tab
+  Widget _buildEnhancedSummaryTab() {
+    if (_currentItem == null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.save, size: 64, color: Colors.grey),
+            SizedBox(height: 16),
+            Text(
+              'Save item first',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Save the item to access enhanced analysis features',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ],
+        ),
+      );
+    }
+
+    return EnhancedSummaryTab(
+      item: _currentItem!,
+      onItemUpdated: (updatedItem) {
+        setState(() {
+          _currentItem = updatedItem;
+        });
+      },
     );
   }
 
@@ -1209,8 +1438,183 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
                 ),
               ],
             ),
+
+            SizedBox(height: 20),
+
+            // NEW: OCR Status Card
+            if (_currentItem != null) _buildOCRStatusCard(),
           ],
         ),
+      ),
+    );
+  }
+
+  // NEW: OCR Status Card
+  Widget _buildOCRStatusCard() {
+    return Card(
+      child: Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  _currentItem?.ocrCompleted == true ? Icons.check_circle : Icons.hourglass_empty,
+                  color: _currentItem?.ocrCompleted == true ? Colors.green : Colors.orange,
+                ),
+                SizedBox(width: 8),
+                Text(
+                  'OCR Text Extraction',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+                Spacer(),
+                if (_isProcessingOCR)
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+              ],
+            ),
+            SizedBox(height: 12),
+
+            Text(
+              _currentItem?.ocrCompleted == true
+                  ? 'Text extraction completed successfully'
+                  : _isProcessingOCR
+                  ? 'Processing images for text extraction...'
+                  : 'Text extraction pending',
+            ),
+
+            if (_currentItem?.ocrCompleted == true && _currentItem?.ocrResults != null) ...[
+              SizedBox(height: 12),
+              Text(
+                OCRService.getOCRSummary(_currentItem!),
+                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+              ),
+            ],
+
+            SizedBox(height: 12),
+
+            Row(
+              children: [
+                if (_currentItem?.ocrCompleted != true && !_isProcessingOCR)
+                  ElevatedButton.icon(
+                    onPressed: _labeledImages.isNotEmpty ? _startOCRProcessing : null,
+                    icon: Icon(Icons.play_arrow),
+                    label: Text('Start OCR'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+                  ),
+
+                if (_currentItem?.ocrCompleted == true) ...[
+                  OutlinedButton.icon(
+                    onPressed: _startOCRProcessing,
+                    icon: Icon(Icons.refresh),
+                    label: Text('Retry OCR'),
+                  ),
+                  SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      // Show OCR results details
+                      _showOCRDetails();
+                    },
+                    icon: Icon(Icons.visibility),
+                    label: Text('View Details'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // NEW: Show OCR details
+  void _showOCRDetails() {
+    if (_currentItem?.ocrResults == null) return;
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('OCR Extraction Results'),
+        content: Container(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Extracted Text by Image:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                SizedBox(height: 12),
+
+                ..._currentItem!.ocrResults!.entries.map((entry) {
+                  return Card(
+                    margin: EdgeInsets.only(bottom: 12),
+                    child: Padding(
+                      padding: EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            entry.key.toUpperCase(),
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.blue[700],
+                            ),
+                          ),
+                          SizedBox(height: 8),
+                          Text(
+                            entry.value.isEmpty ? 'No text found' : entry.value,
+                            style: TextStyle(fontSize: 13),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
+
+                if (_currentItem!.imageClassification != null) ...[
+                  SizedBox(height: 16),
+                  Text(
+                    'Structured Data:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  SizedBox(height: 8),
+
+                  ..._currentItem!.imageClassification!.entries.map((entry) {
+                    if (entry.value.isEmpty) return SizedBox.shrink();
+                    return Padding(
+                      padding: EdgeInsets.only(bottom: 8),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${entry.key.toUpperCase()}: ',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          Expanded(
+                            child: Text(entry.value.join(', ')),
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
+                ],
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          ),
+        ],
       ),
     );
   }
@@ -1320,6 +1724,19 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
                         ),
                       ),
                     ),
+                    // NEW: Individual OCR button
+                    Positioned(
+                      bottom: 8,
+                      left: 8,
+                      child: GestureDetector(
+                        onTap: () => _analyzeIndividualImage(imagePath),
+                        child: Container(
+                          padding: EdgeInsets.all(4),
+                          decoration: BoxDecoration(color: Colors.blue, borderRadius: BorderRadius.circular(4)),
+                          child: Icon(Icons.text_fields, color: Colors.white, size: 16),
+                        ),
+                      ),
+                    ),
                   ],
                 );
               },
@@ -1406,6 +1823,75 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
 
             SizedBox(height: 24),
 
+            // NEW: OCR Actions Section
+            Card(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Text Extraction (OCR)',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    SizedBox(height: 12),
+
+                    Row(
+                      children: [
+                        Icon(
+                          _currentItem?.ocrCompleted == true ? Icons.check_circle : Icons.pending,
+                          color: _currentItem?.ocrCompleted == true ? Colors.green : Colors.orange,
+                        ),
+                        SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _currentItem?.ocrCompleted == true
+                                ? 'Text extracted from ${_currentItem?.ocrResults?.length ?? 0} images'
+                                : 'OCR pending for ${_labeledImages.length} images',
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    SizedBox(height: 12),
+
+                    if (!(_currentItem?.ocrCompleted == true))
+                      ElevatedButton.icon(
+                        onPressed: _isProcessingOCR ? null : _startOCRProcessing,
+                        icon: _isProcessingOCR
+                            ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                            : Icon(Icons.text_fields),
+                        label: Text(_isProcessingOCR ? 'Processing...' : 'Extract Text'),
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+                      )
+                    else
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: _showOCRDetails,
+                              icon: Icon(Icons.visibility),
+                              label: Text('View Text'),
+                            ),
+                          ),
+                          SizedBox(width: 8),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: _startOCRProcessing,
+                              icon: Icon(Icons.refresh),
+                              label: Text('Re-extract'),
+                              style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
+                            ),
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            ),
+
+            SizedBox(height: 16),
+
             // Image classification summary
             Card(
               child: Padding(
@@ -1472,6 +1958,60 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
                         label: Text('ANALYZE WITH AI'),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.purple[600],
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+
+            // NEW: Enhanced Analysis Section
+            if (_currentItem?.ocrCompleted == true) ...[
+              SizedBox(height: 16),
+              Card(
+                color: Colors.green[50],
+                child: Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(Icons.auto_awesome, color: Colors.green[700]),
+                          SizedBox(width: 8),
+                          Text(
+                            'Enhanced Analysis Available',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.green[700],
+                            ),
+                          ),
+                        ],
+                      ),
+                      SizedBox(height: 8),
+                      Text(
+                        'Use extracted text and images for smart product identification',
+                        style: TextStyle(color: Colors.green[700]),
+                      ),
+                      SizedBox(height: 12),
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          // Switch to Enhanced tab
+                          if (_currentItem?.hasTargetedSearchResults == true) {
+                            _tabController.animateTo(_tabController.length - 1);
+                          } else {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Enhanced analysis feature coming soon!')),
+                            );
+                          }
+                        },
+                        icon: Icon(Icons.smart_toy),
+                        label: Text('START ENHANCED ANALYSIS'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green[600],
                           foregroundColor: Colors.white,
                         ),
                       ),
@@ -1559,7 +2099,7 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
             controller: _estimatedValueController,
             decoration: InputDecoration(
                 border: OutlineInputBorder(),
-                prefixText: '\$',
+                prefixText: '\$'
             ),
             keyboardType: TextInputType.numberWithOptions(decimal: true),
             onChanged: (_) => _onTextChanged(),
