@@ -1,420 +1,610 @@
 // ========================================
 // lib/services/enhanced_analysis_service.dart
 // ========================================
-import 'dart:async';
+import 'dart:convert';
 import '../models/item_job.dart';
-import '../services/storage_service.dart';
 import '../services/targeted_search_service.dart';
+import '../services/content_scraping_service.dart';
+import '../services/summary_generation_service.dart';
+import '../services/cloud_services.dart';
+import '../services/storage_service.dart';
 
 class EnhancedAnalysisService {
-  static final Map<String, StreamController<AnalysisProgress>> _progressControllers = {};
-  static final Map<String, bool> _cancelRequests = {};
 
-  /// Start targeted search analysis for a job
-  static Future<void> startTargetedAnalysis(String jobId) async {
-    final progressController = StreamController<AnalysisProgress>.broadcast();
-    _progressControllers[jobId] = progressController;
-    _cancelRequests[jobId] = false;
-
+  /// Complete analysis pipeline for an item
+  static Future<Map<String, dynamic>> performCompleteAnalysis(ItemJob item) async {
     try {
-      // Get the job
-      final job = await StorageService.getJob(jobId);
-      if (job == null) {
-        throw Exception('Job not found');
-      }
+      // Step 1: Extract product identifiers from OCR results
+      final productInfo = await _analyzeProductInformation(item);
 
-      // Check if already has targeted search results
-      if (job.hasTargetedSearchResults) {
-        progressController.add(AnalysisProgress(
-          step: 'Analysis already completed',
-          progress: 1.0,
-          isComplete: true,
-        ));
-        return;
-      }
+      // Step 2: Perform targeted searches
+      final searchResults = await _performTargetedSearches(productInfo);
 
-      // Step 1: Verify prerequisites
-      progressController.add(AnalysisProgress(
-        step: 'Checking prerequisites...',
-        progress: 0.1,
-      ));
+      // Step 3: Scrape content from search results
+      final scrapedContent = await _scrapeTargetedContent(searchResults, productInfo);
 
-      if (job.images.isEmpty) {
-        throw Exception('No images available for analysis');
-      }
+      // Step 4: Generate enhanced summary
+      final summary = await _generateEnhancedSummary(item, productInfo, scrapedContent);
 
-      if (_cancelRequests[jobId] == true) return;
+      // Step 5: Compile final analysis result
+      final analysisResult = _compileAnalysisResult(item, productInfo, searchResults, scrapedContent, summary);
 
-      // Step 2: Ensure OCR is completed
-      if (!job.ocrCompleted) {
-        progressController.add(AnalysisProgress(
-          step: 'Waiting for OCR completion...',
-          progress: 0.2,
-        ));
+      // Step 6: Update item with results
+      await _updateItemWithResults(item, analysisResult);
 
-        // Wait for OCR to complete or timeout after 30 seconds
-        int attempts = 0;
-        while (!job.ocrCompleted && attempts < 30) {
-          if (_cancelRequests[jobId] == true) return;
-
-          await Future.delayed(Duration(seconds: 1));
-          final updatedJob = await StorageService.getJob(jobId);
-          if (updatedJob?.ocrCompleted == true) break;
-          attempts++;
-        }
-
-        // Re-fetch job to get latest OCR results
-        final latestJob = await StorageService.getJob(jobId);
-        if (latestJob?.ocrCompleted != true) {
-          throw Exception('OCR analysis not completed. Please wait for OCR to finish first.');
-        }
-      }
-
-      if (_cancelRequests[jobId] == true) return;
-
-      // Step 3: Start targeted search
-      progressController.add(AnalysisProgress(
-        step: 'Analyzing product information...',
-        progress: 0.3,
-      ));
-
-      await Future.delayed(Duration(milliseconds: 500)); // Show progress
-
-      if (_cancelRequests[jobId] == true) return;
-
-      // Step 4: Perform targeted search
-      progressController.add(AnalysisProgress(
-        step: 'Searching for product matches...',
-        progress: 0.5,
-      ));
-
-      final targetedResults = await TargetedSearchService.performTargetedSearch(job);
-
-      if (_cancelRequests[jobId] == true) return;
-
-      // Step 5: Save results
-      progressController.add(AnalysisProgress(
-        step: 'Saving analysis results...',
-        progress: 0.8,
-      ));
-
-      await StorageService.updateJobWithTargetedSearch(jobId, targetedResults);
-
-      if (_cancelRequests[jobId] == true) return;
-
-      // Step 6: Complete
-      progressController.add(AnalysisProgress(
-        step: 'Analysis complete!',
-        progress: 1.0,
-        isComplete: true,
-        results: targetedResults,
-      ));
+      return {
+        'success': true,
+        'analysis': analysisResult,
+        'timestamp': DateTime.now().toIso8601String(),
+      };
 
     } catch (e) {
-      progressController.add(AnalysisProgress(
-        step: 'Analysis failed',
-        progress: 0.0,
-        isComplete: true,
-        error: e.toString(),
-      ));
-    } finally {
-      // Cleanup
-      await Future.delayed(Duration(seconds: 2));
-      _progressControllers.remove(jobId);
-      _cancelRequests.remove(jobId);
-      progressController.close();
-    }
-  }
-
-  /// Get analysis progress stream for a job
-  static Stream<AnalysisProgress>? getAnalysisProgress(String jobId) {
-    return _progressControllers[jobId]?.stream;
-  }
-
-  /// Cancel analysis for a job
-  static void cancelAnalysis(String jobId) {
-    _cancelRequests[jobId] = true;
-    _progressControllers[jobId]?.add(AnalysisProgress(
-      step: 'Analysis cancelled',
-      progress: 0.0,
-      isComplete: true,
-      error: 'Cancelled by user',
-    ));
-  }
-
-  /// Check if analysis is in progress
-  static bool isAnalysisInProgress(String jobId) {
-    return _progressControllers.containsKey(jobId);
-  }
-
-  /// Re-analyze a job (clear existing results and start fresh)
-  static Future<void> reAnalyzeJob(String jobId) async {
-    // Cancel any existing analysis
-    if (isAnalysisInProgress(jobId)) {
-      cancelAnalysis(jobId);
-      await Future.delayed(Duration(seconds: 1));
-    }
-
-    // Clear existing targeted search results
-    await StorageService.clearJobTargetedSearch(jobId);
-
-    // Start new analysis
-    await startTargetedAnalysis(jobId);
-  }
-
-  /// Get analysis statistics for all jobs
-  static Future<Map<String, dynamic>> getAnalysisStatistics() async {
-    return await StorageService.getTargetedSearchStats();
-  }
-
-  /// Get jobs that need analysis
-  static Future<List<ItemJob>> getJobsPendingAnalysis() async {
-    return await StorageService.getJobsPendingTargetedSearch();
-  }
-
-  /// Bulk analyze multiple jobs
-  static Future<void> bulkAnalyzeJobs(List<String> jobIds, {
-    Function(String jobId, String status)? onJobUpdate,
-  }) async {
-    for (final jobId in jobIds) {
-      try {
-        onJobUpdate?.call(jobId, 'Starting analysis...');
-
-        // Check if job still needs analysis
-        final job = await StorageService.getJob(jobId);
-        if (job?.hasTargetedSearchResults == true) {
-          onJobUpdate?.call(jobId, 'Already analyzed');
-          continue;
-        }
-
-        await startTargetedAnalysis(jobId);
-
-        // Wait for completion
-        final progressStream = getAnalysisProgress(jobId);
-        if (progressStream != null) {
-          await for (final progress in progressStream) {
-            onJobUpdate?.call(jobId, progress.step);
-            if (progress.isComplete) break;
-          }
-        }
-
-        onJobUpdate?.call(jobId, 'Complete');
-
-        // Small delay between jobs to prevent API rate limiting
-        await Future.delayed(Duration(seconds: 2));
-
-      } catch (e) {
-        onJobUpdate?.call(jobId, 'Error: ${e.toString()}');
-      }
-    }
-  }
-
-  /// Enhanced analysis with additional context
-  static Future<TargetedSearchResults> performEnhancedAnalysis(
-      ItemJob job, {
-        Map<String, dynamic>? additionalContext,
-      }) async {
-    // Add any additional context to the job for analysis
-    final enhancedJob = job.copyWith(
-      searchDescription: job.searchDescription.isEmpty
-          ? (additionalContext?['userGuidance'] ?? job.userDescription)
-          : job.searchDescription,
-    );
-
-    return await TargetedSearchService.performTargetedSearch(enhancedJob);
-  }
-
-  /// Get analysis confidence insights
-  static Future<Map<String, dynamic>> getConfidenceInsights() async {
-    final stats = await getAnalysisStatistics();
-    final analyzedJobs = await StorageService.getJobsWithTargetedSearch();
-
-    final confidenceDistribution = <String, int>{
-      'Very High (90-100%)': 0,
-      'High (80-89%)': 0,
-      'Medium (60-79%)': 0,
-      'Low (40-59%)': 0,
-      'Very Low (0-39%)': 0,
-    };
-
-    for (final job in analyzedJobs) {
-      final avgConfidence = job.targetedSearchResults!.averageConfidence;
-      if (avgConfidence >= 0.9) {
-        confidenceDistribution['Very High (90-100%)'] =
-            (confidenceDistribution['Very High (90-100%)'] ?? 0) + 1;
-      } else if (avgConfidence >= 0.8) {
-        confidenceDistribution['High (80-89%)'] =
-            (confidenceDistribution['High (80-89%)'] ?? 0) + 1;
-      } else if (avgConfidence >= 0.6) {
-        confidenceDistribution['Medium (60-79%)'] =
-            (confidenceDistribution['Medium (60-79%)'] ?? 0) + 1;
-      } else if (avgConfidence >= 0.4) {
-        confidenceDistribution['Low (40-59%)'] =
-            (confidenceDistribution['Low (40-59%)'] ?? 0) + 1;
-      } else {
-        confidenceDistribution['Very Low (0-39%)'] =
-            (confidenceDistribution['Very Low (0-39%)'] ?? 0) + 1;
-      }
-    }
-
-    return {
-      'totalAnalyzed': analyzedJobs.length,
-      'averageConfidence': stats['averageConfidence'],
-      'successRate': stats['successRate'],
-      'confidenceDistribution': confidenceDistribution,
-      'recommendations': _generateRecommendations(stats, confidenceDistribution),
-    };
-  }
-
-  /// Generate recommendations based on analysis patterns
-  static List<String> _generateRecommendations(
-      Map<String, dynamic> stats,
-      Map<String, int> confidenceDistribution,
-      ) {
-    final recommendations = <String>[];
-    final successRate = stats['successRate'] as double;
-    final avgConfidence = stats['averageConfidence'] as double;
-
-    if (successRate < 0.6) {
-      recommendations.add('Consider adding more detailed descriptions to improve product identification');
-    }
-
-    if (avgConfidence < 0.7) {
-      recommendations.add('Include brand names and model numbers in your photos for better results');
-    }
-
-    final lowConfidenceCount = (confidenceDistribution['Low (40-59%)'] ?? 0) +
-        (confidenceDistribution['Very Low (0-39%)'] ?? 0);
-
-    if (lowConfidenceCount > 0) {
-      recommendations.add('$lowConfidenceCount items have low confidence - consider re-photographing with clearer text visibility');
-    }
-
-    if (recommendations.isEmpty) {
-      recommendations.add('Your analysis results are performing well! Keep up the good photography practices.');
-    }
-
-    return recommendations;
-  }
-
-  /// Analyze specific aspects of a job for debugging
-  static Future<Map<String, dynamic>> analyzeJobReadiness(String jobId) async {
-    final job = await StorageService.getJob(jobId);
-    if (job == null) {
-      return {'error': 'Job not found'};
-    }
-
-    return {
-      'jobId': jobId,
-      'hasImages': job.images.isNotEmpty,
-      'imageCount': job.images.length,
-      'ocrCompleted': job.ocrCompleted,
-      'ocrTextCount': job.ocrResults?.length ?? 0,
-      'hasBarcodes': job.barcodes?.isNotEmpty ?? false,
-      'barcodeCount': job.barcodes?.length ?? 0,
-      'hasTargetedResults': job.hasTargetedSearchResults,
-      'readinessScore': _calculateReadinessScore(job),
-      'recommendations': _getReadinessRecommendations(job),
-    };
-  }
-
-  /// Calculate how ready a job is for analysis
-  static double _calculateReadinessScore(ItemJob job) {
-    double score = 0.0;
-
-    if (job.images.isNotEmpty) score += 0.3;
-    if (job.ocrCompleted) score += 0.3;
-    if (job.ocrResults?.isNotEmpty == true) score += 0.2;
-    if (job.userDescription.isNotEmpty) score += 0.1;
-    if (job.barcodes?.isNotEmpty == true) score += 0.1;
-
-    return score;
-  }
-
-  /// Get recommendations for improving analysis readiness
-  static List<String> _getReadinessRecommendations(ItemJob job) {
-    final recommendations = <String>[];
-
-    if (job.images.isEmpty) {
-      recommendations.add('Take photos of the item');
-    }
-
-    if (!job.ocrCompleted) {
-      recommendations.add('Wait for text recognition to complete');
-    }
-
-    if (job.userDescription.isEmpty) {
-      recommendations.add('Add a description of the item');
-    }
-
-    if (job.ocrResults?.isEmpty == true) {
-      recommendations.add('Ensure photos contain visible text or labels');
-    }
-
-    return recommendations;
-  }
-
-  /// Get analysis performance metrics
-  static Future<Map<String, dynamic>> getPerformanceMetrics() async {
-    final allJobs = await StorageService.getAllJobs();
-    final analyzedJobs = await StorageService.getJobsWithTargetedSearch();
-
-    if (analyzedJobs.isEmpty) {
+      print('Enhanced analysis failed: $e');
       return {
-        'totalJobs': allJobs.length,
-        'analyzedJobs': 0,
-        'analysisRate': 0.0,
-        'averageConfidence': 0.0,
-        'highConfidenceRate': 0.0,
+        'success': false,
+        'error': e.toString(),
+        'timestamp': DateTime.now().toIso8601String(),
+      };
+    }
+  }
+
+  /// Step 1: Analyze product information from OCR and images
+  static Future<Map<String, dynamic>> _analyzeProductInformation(ItemJob item) async {
+    Map<String, dynamic> productInfo = {
+      'manufacturer': '',
+      'productName': '',
+      'modelNumber': '',
+      'partNumber': '',
+      'serialNumber': '',
+      'upc': '',
+      'searchTerms': <String>[],
+      'confidence': 0.0,
+    };
+
+    // Extract from existing OCR results if available
+    if (item.ocrResults != null && item.ocrResults!.isNotEmpty) {
+      productInfo = TargetedSearchService.extractProductIdentifiers(item.ocrResults!);
+    } else {
+      // Perform OCR on all images
+      final ocrResults = await CloudServices.performOCR(item.images);
+      if (ocrResults.isNotEmpty) {
+        productInfo = TargetedSearchService.extractProductIdentifiers(ocrResults);
+
+        // Update item with OCR results
+        final updatedItem = item.copyWith(
+          ocrResults: ocrResults,
+          ocrCompleted: true,
+        );
+        await StorageService.saveJob(updatedItem);
+      }
+    }
+
+    // Enhance with user descriptions
+    if (productInfo['manufacturer'].toString().isEmpty && item.userDescription.isNotEmpty) {
+      final userDescription = item.userDescription.toLowerCase();
+      final possibleManufacturer = _extractManufacturerFromDescription(userDescription);
+      if (possibleManufacturer.isNotEmpty) {
+        productInfo['manufacturer'] = possibleManufacturer;
+      }
+    }
+
+    if (productInfo['productName'].toString().isEmpty && item.userDescription.isNotEmpty) {
+      productInfo['productName'] = item.userDescription;
+    }
+
+    // Add search guidance from user
+    if (item.searchDescription.isNotEmpty) {
+      final searchTerms = List<String>.from(productInfo['searchTerms']);
+      searchTerms.addAll(item.searchDescription.split(' ').where((term) => term.length > 2));
+      productInfo['searchTerms'] = searchTerms.toSet().toList();
+    }
+
+    return productInfo;
+  }
+
+  /// Step 2: Perform targeted searches
+  static Future<Map<String, dynamic>> _performTargetedSearches(Map<String, dynamic> productInfo) async {
+    if (productInfo['manufacturer'].toString().isEmpty && productInfo['productName'].toString().isEmpty) {
+      return {
+        'success': false,
+        'message': 'Insufficient product information for targeted search',
+        'searchResults': <Map<String, dynamic>>[],
       };
     }
 
-    double totalConfidence = 0.0;
-    int highConfidenceCount = 0;
+    return await TargetedSearchService.performTargetedSearch(
+      manufacturer: productInfo['manufacturer'] ?? '',
+      productName: productInfo['productName'] ?? '',
+      modelNumber: productInfo['modelNumber'],
+      partNumber: productInfo['partNumber'],
+    );
+  }
 
-    for (final job in analyzedJobs) {
-      if (job.targetedSearchResults != null) {
-        totalConfidence += job.targetedSearchResults!.averageConfidence;
-        if (job.hasHighConfidenceProducts) {
-          highConfidenceCount++;
+  /// Step 3: Scrape content from search results
+  static Future<Map<String, dynamic>> _scrapeTargetedContent(
+      Map<String, dynamic> searchResults,
+      Map<String, dynamic> productInfo,
+      ) async {
+
+    if (searchResults['success'] != true ||
+        (searchResults['searchResults'] as List).isEmpty) {
+      return {
+        'success': false,
+        'message': 'No search results available for content scraping',
+      };
+    }
+
+    final results = List<Map<String, dynamic>>.from(searchResults['searchResults']);
+
+    return await ContentScrapingService.scrapeTargetedContent(
+      searchResults: results,
+      manufacturer: productInfo['manufacturer'] ?? '',
+      productName: productInfo['productName'] ?? '',
+    );
+  }
+
+  /// Step 4: Generate enhanced summary
+  static Future<Map<String, dynamic>> _generateEnhancedSummary(
+      ItemJob item,
+      Map<String, dynamic> productInfo,
+      Map<String, dynamic> scrapedContent,
+      ) async {
+
+    List<Map<String, dynamic>> dataSources = [];
+
+    // Prepare data sources for summary generation
+    if (scrapedContent['success'] == true && scrapedContent['rawContent'] != null) {
+      final rawContent = List<Map<String, dynamic>>.from(scrapedContent['rawContent']);
+
+      for (var content in rawContent) {
+        if (content['success'] == true && content['extractedData'] != null) {
+          final extractedData = content['extractedData'];
+
+          // Build full text from extracted data
+          List<String> textParts = [];
+
+          if (extractedData['title'] != null) {
+            textParts.add('Title: ${extractedData['title']}');
+          }
+
+          if (extractedData['description'] != null) {
+            textParts.add('Description: ${extractedData['description']}');
+          }
+
+          if (extractedData['productDescription'] != null) {
+            textParts.add('Product Description: ${extractedData['productDescription']}');
+          }
+
+          if (extractedData['specifications'] != null) {
+            final specs = List<String>.from(extractedData['specifications']);
+            if (specs.isNotEmpty) {
+              textParts.add('Specifications: ${specs.join('; ')}');
+            }
+          }
+
+          if (extractedData['features'] != null) {
+            final features = List<String>.from(extractedData['features']);
+            if (features.isNotEmpty) {
+              textParts.add('Features: ${features.join('; ')}');
+            }
+          }
+
+          if (extractedData['applications'] != null) {
+            final applications = List<String>.from(extractedData['applications']);
+            if (applications.isNotEmpty) {
+              textParts.add('Applications: ${applications.join('; ')}');
+            }
+          }
+
+          dataSources.add({
+            'url': content['url'],
+            'title': extractedData['title'] ?? 'Scraped Content',
+            'fullText': textParts.join('\n\n'),
+            'confidence': extractedData['confidence'] ?? 0.5,
+            'dataType': extractedData['dataType'] ?? 'web_scrape',
+            'scrapedAt': content['scrapedAt'],
+          });
         }
       }
     }
 
+    // Add fallback content if no scraped data
+    if (dataSources.isEmpty) {
+      // Use OCR results as fallback
+      if (item.ocrResults != null) {
+        dataSources.add({
+          'url': 'internal_ocr',
+          'title': 'OCR Extracted Text',
+          'fullText': item.ocrResults!.values.join('\n\n'),
+          'confidence': 0.3,
+          'dataType': 'ocr',
+          'scrapedAt': DateTime.now().toIso8601String(),
+        });
+      }
+    }
+
+    // Generate summary using enhanced data
+    return await SummaryGenerationService.generateItemSummary(
+      dataSources: dataSources,
+      userDescription: item.userDescription,
+      searchKeywords: [
+        productInfo['manufacturer'] ?? '',
+        productInfo['productName'] ?? '',
+        productInfo['modelNumber'] ?? '',
+        item.searchDescription,
+      ].where((s) => s.isNotEmpty).join(' '),
+    );
+  }
+
+  /// Step 5: Compile final analysis result
+  static Map<String, dynamic> _compileAnalysisResult(
+      ItemJob item,
+      Map<String, dynamic> productInfo,
+      Map<String, dynamic> searchResults,
+      Map<String, dynamic> scrapedContent,
+      Map<String, dynamic> summary,
+      ) {
+
+    // Calculate overall confidence
+    double overallConfidence = 0.2;
+    int confidenceFactors = 0;
+
+    if (productInfo['confidence'] != null) {
+      overallConfidence += (productInfo['confidence'] as double) * 0.3;
+      confidenceFactors++;
+    }
+
+    if (scrapedContent['overallConfidence'] != null) {
+      overallConfidence += (scrapedContent['overallConfidence'] as double) * 0.4;
+      confidenceFactors++;
+    }
+
+    if (summary['confidence'] != null) {
+      overallConfidence += (summary['confidence'] as double) * 0.3;
+      confidenceFactors++;
+    }
+
+    if (confidenceFactors > 0) {
+      overallConfidence = overallConfidence / confidenceFactors;
+    }
+
+    // Compile pricing information
+    Map<String, dynamic> pricingInfo = {};
+    if (scrapedContent['processedData'] != null &&
+        scrapedContent['processedData']['pricingData'] != null) {
+      final pricingData = scrapedContent['processedData']['pricingData'];
+      if (pricingData is List && pricingData.isNotEmpty) {
+        pricingInfo = SummaryGenerationService.generatePricingSummary(
+            List<Map<String, dynamic>>.from(pricingData)
+        );
+      }
+    }
+
     return {
-      'totalJobs': allJobs.length,
-      'analyzedJobs': analyzedJobs.length,
-      'analysisRate': analyzedJobs.length / allJobs.length,
-      'averageConfidence': totalConfidence / analyzedJobs.length,
-      'highConfidenceRate': highConfidenceCount / analyzedJobs.length,
-      'manufacturerSourcesAvg': analyzedJobs.isEmpty ? 0.0 :
-      analyzedJobs.map((j) => j.targetedSearchResults!.manufacturerSourcesCount)
-          .reduce((a, b) => a + b) / analyzedJobs.length,
+      'itemId': item.id,
+      'analysisVersion': '2.0',
+      'analysisType': 'enhanced_targeted',
+      'completedAt': DateTime.now().toIso8601String(),
+      'overallConfidence': overallConfidence,
+
+      // Product Information
+      'productInfo': productInfo,
+
+      // Search Results Summary
+      'searchSummary': {
+        'success': searchResults['success'] ?? false,
+        'searchCount': searchResults['searchCount'] ?? 0,
+        'resultsFound': searchResults['resultsFound'] ?? 0,
+        'manufacturer': searchResults['manufacturer'] ?? '',
+        'productName': searchResults['productName'] ?? '',
+      },
+
+      // Content Summary
+      'contentSummary': {
+        'success': scrapedContent['success'] ?? false,
+        'contentScraped': scrapedContent['contentScraped'] ?? 0,
+        'contentTypes': scrapedContent['contentTypes'] ?? {},
+        'overallConfidence': scrapedContent['overallConfidence'] ?? 0.0,
+      },
+
+      // Generated Summary
+      'summary': summary,
+
+      // Pricing Information
+      'pricing': pricingInfo,
+
+      // Processing Stats
+      'processingStats': {
+        'ocrCompleted': item.ocrCompleted,
+        'classificationCompleted': item.classificationCompleted,
+        'searchesPerformed': searchResults['searchCount'] ?? 0,
+        'contentScraped': scrapedContent['contentScraped'] ?? 0,
+        'summaryGenerated': summary['success'] ?? false,
+      },
+
+      // Raw Data (for debugging/review)
+      'rawData': {
+        'searchResults': searchResults,
+        'scrapedContent': scrapedContent,
+        'productIdentification': productInfo,
+      },
     };
   }
-}
 
-/// Progress tracking for analysis operations
-class AnalysisProgress {
-  final String step;
-  final double progress;
-  final bool isComplete;
-  final String? error;
-  final TargetedSearchResults? results;
+  /// Step 6: Update item with results
+  static Future<void> _updateItemWithResults(ItemJob item, Map<String, dynamic> analysisResult) async {
+    final updatedItem = item.copyWith(
+      analysisResult: analysisResult,
+      completedAt: DateTime.now(),
+      webSearchCompleted: true,
+      pricingCompleted: analysisResult['pricing']?.isNotEmpty == true,
+    );
 
-  AnalysisProgress({
-    required this.step,
-    required this.progress,
-    this.isComplete = false,
-    this.error,
-    this.results,
-  });
+    await StorageService.saveJob(updatedItem);
+  }
 
-  bool get hasError => error != null;
-  bool get isSuccessful => isComplete && !hasError;
+  /// Extract manufacturer from user description
+  static String _extractManufacturerFromDescription(String description) {
+    final knownBrands = [
+      'apple', 'samsung', 'sony', 'lg', 'panasonic', 'canon', 'nikon',
+      'dewalt', 'makita', 'bosch', 'craftsman', 'black+decker', 'ryobi',
+      'kitchenaid', 'cuisinart', 'hamilton beach', 'oster', 'ninja',
+      'dell', 'hp', 'lenovo', 'asus', 'acer', 'microsoft',
+    ];
 
-  @override
-  String toString() {
-    return 'AnalysisProgress(step: $step, progress: $progress, isComplete: $isComplete, hasError: $hasError)';
+    final words = description.toLowerCase().split(' ');
+    for (String word in words) {
+      if (knownBrands.contains(word)) {
+        // Capitalize first letter
+        return word[0].toUpperCase() + word.substring(1);
+      }
+    }
+
+    return '';
+  }
+
+  /// Trigger background analysis for a newly created item
+  static Future<void> triggerBackgroundAnalysis(ItemJob item) async {
+    try {
+      // Run analysis in background (don't await)
+      Future.microtask(() async {
+        await performCompleteAnalysis(item);
+      });
+    } catch (e) {
+      print('Background analysis trigger failed: $e');
+    }
+  }
+
+  /// Get analysis status for an item
+  static Map<String, dynamic> getAnalysisStatus(ItemJob item) {
+    if (item.analysisResult != null) {
+      final result = item.analysisResult!;
+      return {
+        'status': 'completed',
+        'completedAt': result['completedAt'],
+        'confidence': result['overallConfidence'] ?? 0.0,
+        'analysisType': result['analysisType'] ?? 'standard',
+        'hasProductInfo': result['productInfo'] != null,
+        'hasSearchResults': result['searchSummary']?['success'] == true,
+        'hasContentScraped': result['contentSummary']?['success'] == true,
+        'hasSummary': result['summary']?['success'] == true,
+        'hasPricing': result['pricing']?['success'] == true,
+      };
+    }
+
+    // Check individual completion flags
+    List<String> completedSteps = [];
+    List<String> pendingSteps = [];
+
+    if (item.ocrCompleted) {
+      completedSteps.add('OCR Processing');
+    } else {
+      pendingSteps.add('OCR Processing');
+    }
+
+    if (item.classificationCompleted) {
+      completedSteps.add('Image Classification');
+    } else {
+      pendingSteps.add('Image Classification');
+    }
+
+    if (item.webSearchCompleted) {
+      completedSteps.add('Web Search');
+    } else {
+      pendingSteps.add('Web Search');
+    }
+
+    if (item.pricingCompleted) {
+      completedSteps.add('Pricing Analysis');
+    } else {
+      pendingSteps.add('Pricing Analysis');
+    }
+
+    String status = 'in_progress';
+    if (pendingSteps.isEmpty) {
+      status = 'completed';
+    } else if (completedSteps.isEmpty) {
+      status = 'pending';
+    }
+
+    return {
+      'status': status,
+      'completedSteps': completedSteps,
+      'pendingSteps': pendingSteps,
+      'progress': completedSteps.length / (completedSteps.length + pendingSteps.length),
+    };
+  }
+
+  /// Regenerate summary for an existing item
+  static Future<Map<String, dynamic>> regenerateSummary(ItemJob item, {
+    String? additionalGuidance,
+    bool useAIGeneration = true,
+  }) async {
+
+    if (item.analysisResult == null) {
+      return {
+        'success': false,
+        'error': 'No analysis data available for summary regeneration',
+      };
+    }
+
+    try {
+      final analysisResult = item.analysisResult!;
+      final rawData = analysisResult['rawData'] ?? {};
+      final scrapedContent = rawData['scrapedContent'] ?? {};
+
+      // Prepare data sources from existing scraped content
+      List<Map<String, dynamic>> dataSources = [];
+
+      if (scrapedContent['rawContent'] != null) {
+        final rawContent = List<Map<String, dynamic>>.from(scrapedContent['rawContent']);
+
+        for (var content in rawContent) {
+          if (content['success'] == true && content['extractedData'] != null) {
+            final extractedData = content['extractedData'];
+
+            List<String> textParts = [];
+
+            if (extractedData['title'] != null) {
+              textParts.add('Title: ${extractedData['title']}');
+            }
+
+            if (extractedData['description'] != null) {
+              textParts.add('Description: ${extractedData['description']}');
+            }
+
+            if (extractedData['specifications'] != null) {
+              final specs = List<String>.from(extractedData['specifications']);
+              if (specs.isNotEmpty) {
+                textParts.add('Specifications: ${specs.join('; ')}');
+              }
+            }
+
+            if (extractedData['features'] != null) {
+              final features = List<String>.from(extractedData['features']);
+              if (features.isNotEmpty) {
+                textParts.add('Features: ${features.join('; ')}');
+              }
+            }
+
+            dataSources.add({
+              'url': content['url'],
+              'title': extractedData['title'] ?? 'Scraped Content',
+              'fullText': textParts.join('\n\n'),
+              'confidence': extractedData['confidence'] ?? 0.5,
+              'dataType': extractedData['dataType'] ?? 'web_scrape',
+              'scrapedAt': content['scrapedAt'],
+            });
+          }
+        }
+      }
+
+      // Add additional guidance to search keywords
+      String searchKeywords = item.searchDescription;
+      if (additionalGuidance?.isNotEmpty == true) {
+        searchKeywords = '$searchKeywords $additionalGuidance';
+      }
+
+      // Generate new summary
+      final newSummary = await SummaryGenerationService.generateItemSummary(
+        dataSources: dataSources,
+        userDescription: item.userDescription,
+        searchKeywords: searchKeywords,
+      );
+
+      // Update analysis result with new summary
+      final updatedAnalysisResult = Map<String, dynamic>.from(analysisResult);
+      updatedAnalysisResult['summary'] = newSummary;
+      updatedAnalysisResult['summaryRegeneratedAt'] = DateTime.now().toIso8601String();
+      if (additionalGuidance?.isNotEmpty == true) {
+        updatedAnalysisResult['summaryGuidance'] = additionalGuidance;
+      }
+
+      // Update item
+      final updatedItem = item.copyWith(analysisResult: updatedAnalysisResult);
+      await StorageService.saveJob(updatedItem);
+
+      return {
+        'success': true,
+        'summary': newSummary,
+        'regeneratedAt': DateTime.now().toIso8601String(),
+      };
+
+    } catch (e) {
+      return {
+        'success': false,
+        'error': 'Summary regeneration failed: $e',
+      };
+    }
+  }
+
+  /// Validate analysis results for completeness
+  static Map<String, dynamic> validateAnalysisResults(ItemJob item) {
+    final issues = <String>[];
+    final suggestions = <String>[];
+
+    if (item.analysisResult == null) {
+      return {
+        'valid': false,
+        'issues': ['No analysis results available'],
+        'suggestions': ['Run complete analysis on this item'],
+      };
+    }
+
+    final result = item.analysisResult!;
+
+    // Check product identification
+    final productInfo = result['productInfo'] ?? {};
+    if (productInfo['manufacturer']?.toString().isEmpty != false) {
+      issues.add('Manufacturer not identified');
+      suggestions.add('Review OCR results or add manufacturer to item description');
+    }
+
+    if (productInfo['productName']?.toString().isEmpty != false) {
+      issues.add('Product name not identified');
+      suggestions.add('Add more descriptive product name in item description');
+    }
+
+    // Check search results
+    final searchSummary = result['searchSummary'] ?? {};
+    if (searchSummary['success'] != true) {
+      issues.add('No search results found');
+      suggestions.add('Try different search terms or verify product information');
+    } else if ((searchSummary['resultsFound'] ?? 0) < 3) {
+      issues.add('Limited search results');
+      suggestions.add('Consider adding more specific model numbers or part numbers');
+    }
+
+    // Check content scraping
+    final contentSummary = result['contentSummary'] ?? {};
+    if (contentSummary['success'] != true) {
+      issues.add('No content scraped from search results');
+      suggestions.add('Search results may not contain scrapable content');
+    }
+
+    // Check summary quality
+    final summary = result['summary'] ?? {};
+    if (summary['success'] != true) {
+      issues.add('Summary generation failed');
+      suggestions.add('Try regenerating summary or add more detailed descriptions');
+    } else if ((summary['confidence'] ?? 0.0) < 0.5) {
+      issues.add('Low confidence summary');
+      suggestions.add('Review and edit generated summary for accuracy');
+    }
+
+    // Check pricing
+    final pricing = result['pricing'] ?? {};
+    if (pricing['success'] != true) {
+      issues.add('No pricing information found');
+      suggestions.add('Pricing data may not be available for this product type');
+    }
+
+    return {
+      'valid': issues.isEmpty,
+      'issues': issues,
+      'suggestions': suggestions,
+      'overallConfidence': result['overallConfidence'] ?? 0.0,
+      'analysisComplete': issues.length < 3, // Allow some minor issues
+    };
   }
 }

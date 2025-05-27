@@ -1,5 +1,5 @@
 // ========================================
-// lib/services/storage_service.dart - UPDATED WITH TARGETED SEARCH
+// lib/services/storage_service.dart (Corrected)
 // ========================================
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -21,6 +21,11 @@ class StorageService {
 
     final jsonList = jobs.map((job) => job.toJson()).toList();
     await prefs.setString(_jobsKey, jsonEncode(jsonList));
+  }
+
+  // For backward compatibility
+  static Future<void> updateItem(ItemJob item) async {
+    await saveJob(item);
   }
 
   static Future<List<ItemJob>> getAllJobs() async {
@@ -52,48 +57,49 @@ class StorageService {
     await prefs.setString(_jobsKey, jsonEncode(jsonList));
   }
 
-  // NEW: TARGETED SEARCH SUPPORT METHODS
-
-  /// Update a job with targeted search results
-  static Future<void> updateJobWithTargetedSearch(String jobId, TargetedSearchResults results) async {
-    final job = await getJob(jobId);
-    if (job != null) {
-      final updatedJob = job.copyWith(
-        targetedSearchResults: results,
-        webSearchCompleted: true, // Mark as completed
-      );
-      await saveJob(updatedJob);
-    }
-  }
-
-  /// Get all jobs that have targeted search results
-  static Future<List<ItemJob>> getJobsWithTargetedSearch() async {
-    final allJobs = await getAllJobs();
-    return allJobs.where((job) => job.hasTargetedSearchResults).toList();
-  }
-
-  /// Get all jobs that need targeted search analysis
-  static Future<List<ItemJob>> getJobsPendingTargetedSearch() async {
+  // Get jobs with enhanced analysis results
+  static Future<List<ItemJob>> getJobsWithEnhancedAnalysis() async {
     final allJobs = await getAllJobs();
     return allJobs.where((job) =>
-    !job.hasTargetedSearchResults &&
-        job.ocrCompleted && // Only analyze jobs that have OCR completed
-        job.images.isNotEmpty
+    job.analysisResult != null &&
+        job.analysisResult!['analysisType'] == 'enhanced_targeted'
     ).toList();
   }
 
-  /// Get targeted search statistics
-  static Future<Map<String, dynamic>> getTargetedSearchStats() async {
+  // Get jobs that need enhanced analysis
+  static Future<List<ItemJob>> getJobsNeedingAnalysis() async {
     final allJobs = await getAllJobs();
-    final analyzedJobs = allJobs.where((job) => job.hasTargetedSearchResults).toList();
+    return allJobs.where((job) =>
+    job.analysisResult == null ||
+        job.analysisResult!['analysisType'] != 'enhanced_targeted'
+    ).toList();
+  }
+
+  // Get analysis statistics
+  static Future<Map<String, dynamic>> getAnalysisStatistics() async {
+    final allJobs = await getAllJobs();
+    final analyzedJobs = allJobs.where((job) =>
+    job.analysisResult != null &&
+        job.analysisResult!['analysisType'] == 'enhanced_targeted'
+    ).toList();
+
+    if (analyzedJobs.isEmpty) {
+      return {
+        'totalJobs': allJobs.length,
+        'analyzedJobs': 0,
+        'averageConfidence': 0.0,
+        'highConfidenceJobs': 0,
+      };
+    }
 
     double totalConfidence = 0.0;
     int highConfidenceCount = 0;
 
-    for (final job in analyzedJobs) {
-      if (job.targetedSearchResults != null) {
-        totalConfidence += job.targetedSearchResults!.averageConfidence;
-        if (job.hasHighConfidenceProducts) {
+    for (var job in analyzedJobs) {
+      if (job.analysisResult != null && job.analysisResult!['overallConfidence'] != null) {
+        final confidence = job.analysisResult!['overallConfidence'] as double;
+        totalConfidence += confidence;
+        if (confidence > 0.7) {
           highConfidenceCount++;
         }
       }
@@ -102,86 +108,55 @@ class StorageService {
     return {
       'totalJobs': allJobs.length,
       'analyzedJobs': analyzedJobs.length,
-      'pendingJobs': allJobs.length - analyzedJobs.length,
-      'averageConfidence': analyzedJobs.isEmpty ? 0.0 : totalConfidence / analyzedJobs.length,
+      'averageConfidence': totalConfidence / analyzedJobs.length,
       'highConfidenceJobs': highConfidenceCount,
-      'successRate': allJobs.isEmpty ? 0.0 : (highConfidenceCount / allJobs.length),
     };
   }
 
-  /// Clear targeted search results for a job (for re-analysis)
-  static Future<void> clearJobTargetedSearch(String jobId) async {
-    final job = await getJob(jobId);
-    if (job != null) {
+  // Clear all analysis results (for testing/reset)
+  static Future<void> clearAllAnalysisResults() async {
+    final allJobs = await getAllJobs();
+
+    for (var job in allJobs) {
       final updatedJob = job.copyWith(
-        targetedSearchResults: null,
+        analysisResult: null,
+        ocrCompleted: false,
         webSearchCompleted: false,
+        pricingCompleted: false,
       );
       await saveJob(updatedJob);
     }
   }
 
-  /// Get jobs analyzed within a specific date range
-  static Future<List<ItemJob>> getJobsAnalyzedInRange(DateTime startDate, DateTime endDate) async {
-    final analyzedJobs = await getJobsWithTargetedSearch();
-    return analyzedJobs.where((job) {
-      final analysisDate = job.targetedSearchResults!.analysisDate;
-      return analysisDate.isAfter(startDate) && analysisDate.isBefore(endDate);
-    }).toList();
-  }
+  // Export job data for debugging
+  static Future<Map<String, dynamic>> exportJobData(String jobId) async {
+    final job = await getJob(jobId);
+    if (job == null) {
+      return {'error': 'Job not found'};
+    }
 
-  /// Search jobs by product name or manufacturer from targeted search results
-  static Future<List<ItemJob>> searchJobsByProduct(String query) async {
-    final analyzedJobs = await getJobsWithTargetedSearch();
-    final lowerQuery = query.toLowerCase();
-
-    return analyzedJobs.where((job) {
-      final products = job.targetedSearchResults!.identifiedProducts;
-      return products.any((product) =>
-      product.manufacturer.toLowerCase().contains(lowerQuery) ||
-          product.productName.toLowerCase().contains(lowerQuery) ||
-          product.modelNumber.toLowerCase().contains(lowerQuery)
-      ) || job.userDescription.toLowerCase().contains(lowerQuery) ||
-          job.searchDescription.toLowerCase().contains(lowerQuery);
-    }).toList();
-  }
-
-  /// Export targeted search data for backup/sharing
-  static Future<Map<String, dynamic>> exportTargetedSearchData() async {
-    final analyzedJobs = await getJobsWithTargetedSearch();
     return {
-      'exportDate': DateTime.now().toIso8601String(),
-      'jobCount': analyzedJobs.length,
-      'jobs': analyzedJobs.map((job) => {
-        'id': job.id,
-        'userDescription': job.userDescription,
-        'searchDescription': job.searchDescription,
-        'targetedSearchResults': job.targetedSearchResults?.toJson(),
-        'analysisDate': job.targetedSearchResults?.analysisDate.toIso8601String(),
-      }).toList(),
+      'id': job.id,
+      'userDescription': job.userDescription,
+      'searchDescription': job.searchDescription,
+      'createdAt': job.createdAt.toIso8601String(),
+      'completedAt': job.completedAt?.toIso8601String(),
+      'analysisResult': job.analysisResult,
+      'ocrResults': job.ocrResults,
+      'imageClassification': job.imageClassification,
+      'measurementsDisplay': job.measurementsDisplay,
+      'isCompleted': job.isCompleted,
     };
   }
 
-  /// Get jobs that might benefit from re-analysis (old results)
-  static Future<List<ItemJob>> getJobsNeedingReanalysis({int daysSinceAnalysis = 30}) async {
-    final analyzedJobs = await getJobsWithTargetedSearch();
-    final cutoffDate = DateTime.now().subtract(Duration(days: daysSinceAnalysis));
+  // Get recent activity (jobs modified in last N days)
+  static Future<List<ItemJob>> getRecentActivity({int days = 7}) async {
+    final allJobs = await getAllJobs();
+    final cutoffDate = DateTime.now().subtract(Duration(days: days));
 
-    return analyzedJobs.where((job) {
-      final analysisDate = job.targetedSearchResults!.analysisDate;
-      return analysisDate.isBefore(cutoffDate);
+    return allJobs.where((job) {
+      final analysisDate = job.completedAt ?? job.createdAt;
+      return analysisDate.isAfter(cutoffDate);
     }).toList();
-  }
-
-  /// Update job with enhanced OCR results for better targeted search
-  static Future<void> updateJobOcrForTargetedSearch(String jobId, Map<String, String> enhancedOcrResults) async {
-    final job = await getJob(jobId);
-    if (job != null) {
-      final updatedJob = job.copyWith(
-        ocrResults: {...(job.ocrResults ?? {}), ...enhancedOcrResults},
-        ocrCompleted: true,
-      );
-      await saveJob(updatedJob);
-    }
   }
 }
