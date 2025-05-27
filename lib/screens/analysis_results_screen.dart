@@ -1,10 +1,11 @@
 // ========================================
-// lib/screens/analysis_results_screen.dart
+// lib/screens/analysis_results_screen.dart (Complete Enhanced Version)
 // ========================================
 import 'package:flutter/material.dart';
+import 'dart:async';
 import '../models/item_job.dart';
 import '../services/storage_service.dart';
-// import '../services/summary_generation_service.dart';
+import '../services/enhanced_analysis_service.dart';
 import 'web_scraper_screen.dart';
 
 class AnalysisResultsScreen extends StatefulWidget {
@@ -19,6 +20,7 @@ class AnalysisResultsScreen extends StatefulWidget {
 class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with SingleTickerProviderStateMixin {
   late TabController _tabController;
   late ItemJob _currentItem;
+  Timer? _refreshTimer;
 
   // Editable controllers
   late TextEditingController _titleController;
@@ -29,6 +31,7 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
 
   bool _isLoading = false;
   bool _hasUnsavedChanges = false;
+  bool _isAnalyzing = false;
 
   @override
   void initState() {
@@ -36,6 +39,7 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
     _tabController = TabController(length: 4, vsync: this);
     _currentItem = widget.item;
     _initializeControllers();
+    _checkAnalysisStatus();
   }
 
   void _initializeControllers() {
@@ -47,7 +51,7 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
       text: summary?['itemTitle'] ?? _currentItem.userDescription,
     );
     _descriptionController = TextEditingController(
-      text: summary?['description'] ?? 'Analysis in progress...',
+      text: summary?['description'] ?? '',
     );
     _estimatedValueController = TextEditingController(
       text: pricing?['estimatedValue']?.toStringAsFixed(2) ?? '0.00',
@@ -69,6 +73,40 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
     _titleController.addListener(_onTextChanged);
     _descriptionController.addListener(_onTextChanged);
     _estimatedValueController.addListener(_onTextChanged);
+  }
+
+  void _checkAnalysisStatus() async {
+    final status = EnhancedAnalysisService.getAnalysisStatus(_currentItem);
+
+    if (status['status'] == 'pending' || status['status'] == 'in_progress') {
+      setState(() => _isAnalyzing = true);
+
+      // Start timer to check for updates
+      _refreshTimer = Timer.periodic(Duration(seconds: 3), (timer) async {
+        final updatedItem = await StorageService.getJob(_currentItem.id);
+        if (updatedItem != null) {
+          final newStatus = EnhancedAnalysisService.getAnalysisStatus(updatedItem);
+          if (newStatus['status'] == 'completed') {
+            timer.cancel();
+            setState(() {
+              _currentItem = updatedItem;
+              _isAnalyzing = false;
+            });
+            _reinitializeControllers();
+          }
+        }
+      });
+    }
+  }
+
+  void _reinitializeControllers() {
+    // Dispose old controllers
+    _disposeControllers();
+
+    // Initialize with new data
+    _initializeControllers();
+
+    setState(() {});
   }
 
   void _onTextChanged() {
@@ -127,39 +165,174 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
     }
   }
 
-  Future<void> _regenerateSummary() async {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Summary regeneration coming soon!')),
+  Future<void> _triggerEnhancedAnalysis() async {
+    setState(() => _isAnalyzing = true);
+
+    try {
+      // Trigger enhanced analysis
+      EnhancedAnalysisService.triggerBackgroundAnalysis(_currentItem);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Enhanced analysis started...'),
+          action: SnackBarAction(
+            label: 'VIEW STATUS',
+            onPressed: () => _showAnalysisProgress(),
+          ),
+        ),
+      );
+
+      // Start timer to check progress
+      _refreshTimer = Timer.periodic(Duration(seconds: 3), (timer) async {
+        final updatedItem = await StorageService.getJob(_currentItem.id);
+        if (updatedItem != null) {
+          final status = EnhancedAnalysisService.getAnalysisStatus(updatedItem);
+          if (status['status'] == 'completed') {
+            timer.cancel();
+            setState(() {
+              _currentItem = updatedItem;
+              _isAnalyzing = false;
+            });
+            _reinitializeControllers();
+
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Enhanced analysis completed!'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        }
+      });
+
+    } catch (e) {
+      setState(() => _isAnalyzing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error starting analysis: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  void _showAnalysisProgress() {
+    final status = EnhancedAnalysisService.getAnalysisStatus(_currentItem);
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Analysis Progress'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Status: ${status['status']}'),
+            SizedBox(height: 8),
+            if (status['completedSteps'] != null) ...[
+              Text('Completed:', style: TextStyle(fontWeight: FontWeight.bold)),
+              ...List<String>.from(status['completedSteps']).map(
+                    (step) => Text('✓ $step', style: TextStyle(color: Colors.green)),
+              ),
+            ],
+            if (status['pendingSteps'] != null && status['pendingSteps'].isNotEmpty) ...[
+              SizedBox(height: 8),
+              Text('Pending:', style: TextStyle(fontWeight: FontWeight.bold)),
+              ...List<String>.from(status['pendingSteps']).map(
+                    (step) => Text('• $step', style: TextStyle(color: Colors.orange)),
+              ),
+            ],
+            SizedBox(height: 12),
+            LinearProgressIndicator(
+              value: status['progress'] ?? 0.0,
+              backgroundColor: Colors.grey[300],
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          ),
+        ],
+      ),
     );
   }
 
-  List<Map<String, dynamic>> _collectDataSources() {
-    List<Map<String, dynamic>> sources = [];
-    final analysisResult = _currentItem.analysisResult;
+  Future<void> _regenerateSummary() async {
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Regenerate Summary'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Add specific guidance for the AI summary generation:'),
+            SizedBox(height: 12),
+            TextField(
+              decoration: InputDecoration(
+                hintText: 'e.g., Focus on technical specifications',
+                border: OutlineInputBorder(),
+              ),
+              maxLines: 3,
+              onChanged: (value) {
+                // Store the guidance
+              },
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'regenerate'),
+            child: Text('Regenerate'),
+          ),
+        ],
+      ),
+    );
 
-    if (analysisResult != null) {
-      // Add scraped sources
-      final scrapedSources = analysisResult['scrapedSources'] as List? ?? [];
-      for (var source in scrapedSources) {
-        if (source['data'] != null) {
-          sources.add(source['data']);
+    if (result == 'regenerate') {
+      setState(() => _isLoading = true);
+
+      try {
+        final regenerateResult = await EnhancedAnalysisService.regenerateSummary(_currentItem);
+
+        if (regenerateResult['success'] == true) {
+          final updatedItem = await StorageService.getJob(_currentItem.id);
+          if (updatedItem != null) {
+            setState(() => _currentItem = updatedItem);
+            _reinitializeControllers();
+
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Summary regenerated successfully!'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Error regenerating summary: ${regenerateResult['error']}'),
+              backgroundColor: Colors.red,
+            ),
+          );
         }
-      }
-
-      // Add OCR data
-      if (_currentItem.ocrResults?.isNotEmpty == true) {
-        sources.add({
-          'url': 'local://ocr',
-          'title': 'OCR Data',
-          'fullText': _currentItem.ocrResults!.values.join('\n'),
-          'scrapedAt': DateTime.now().toIso8601String(),
-          'confidence': 0.7,
-          'dataType': 'ocr',
-        });
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error regenerating summary: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      } finally {
+        setState(() => _isLoading = false);
       }
     }
-
-    return sources;
   }
 
   void _addSpecification() {
@@ -234,42 +407,12 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
   Widget _buildSummaryTab() {
     final hasAnalysis = _currentItem.analysisResult?['summary'] != null;
 
+    if (_isAnalyzing) {
+      return _buildAnalyzingState();
+    }
+
     if (!hasAnalysis) {
-      return Padding(
-        padding: EdgeInsets.all(16),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.pending_actions, size: 64, color: Colors.grey[400]),
-            SizedBox(height: 16),
-            Text(
-              'Analysis Not Complete',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            SizedBox(height: 8),
-            Text(
-              'This item needs to be analyzed to generate a summary.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.grey[600]),
-            ),
-            SizedBox(height: 24),
-            ElevatedButton.icon(
-              onPressed: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Analysis features coming soon!')),
-                );
-              },
-              icon: Icon(Icons.psychology),
-              label: Text('Analyze Item'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blue[600],
-                foregroundColor: Colors.white,
-                padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-              ),
-            ),
-          ],
-        ),
-      );
+      return _buildAnalysisPrompt();
     }
 
     return SingleChildScrollView(
@@ -277,6 +420,33 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Enhanced Analysis Badge
+          Container(
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.green[100],
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.green[300]!),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.auto_awesome, size: 16, color: Colors.green[700]),
+                SizedBox(width: 4),
+                Text(
+                  'Enhanced Analysis',
+                  style: TextStyle(
+                    color: Colors.green[700],
+                    fontWeight: FontWeight.w600,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          SizedBox(height: 16),
+
           // Title
           Text('Item Title', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
           SizedBox(height: 8),
@@ -296,7 +466,164 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
             decoration: InputDecoration(border: OutlineInputBorder()),
             maxLines: 8,
           ),
+
+          SizedBox(height: 20),
+
+          // Analysis Quality Indicator
+          _buildAnalysisQualityIndicator(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildAnalyzingState() {
+    final status = EnhancedAnalysisService.getAnalysisStatus(_currentItem);
+
+    return Center(
+      child: Padding(
+        padding: EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(
+              strokeWidth: 3,
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+            ),
+            SizedBox(height: 24),
+            Text(
+              'Enhanced Analysis in Progress',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Using AI to analyze your item...',
+              style: TextStyle(color: Colors.grey[600]),
+            ),
+            SizedBox(height: 16),
+            LinearProgressIndicator(
+              value: status['progress'] ?? 0.0,
+              backgroundColor: Colors.grey[300],
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Progress: ${((status['progress'] ?? 0.0) * 100).toInt()}%',
+              style: TextStyle(color: Colors.grey[600]),
+            ),
+            SizedBox(height: 24),
+            ElevatedButton(
+              onPressed: _showAnalysisProgress,
+              child: Text('View Details'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAnalysisPrompt() {
+    return Padding(
+      padding: EdgeInsets.all(16),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.auto_awesome, size: 64, color: Colors.blue[400]),
+          SizedBox(height: 16),
+          Text(
+            'Enhanced Analysis Available',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
+          SizedBox(height: 8),
+          Text(
+            'Get detailed product information, specifications, and pricing using our enhanced AI analysis system.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey[600]),
+          ),
+          SizedBox(height: 24),
+          ElevatedButton.icon(
+            onPressed: _triggerEnhancedAnalysis,
+            icon: Icon(Icons.psychology),
+            label: Text('Start Enhanced Analysis'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.blue[600],
+              foregroundColor: Colors.white,
+              padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            ),
+          ),
+          SizedBox(height: 16),
+          Text(
+            'This will use OCR, targeted searches, and AI to generate a comprehensive analysis.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey[500], fontSize: 12),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAnalysisQualityIndicator() {
+    if (_currentItem.analysisResult == null) return SizedBox.shrink();
+
+    final validation = EnhancedAnalysisService.validateAnalysisResults(_currentItem);
+    final confidence = validation['overallConfidence'] ?? 0.0;
+
+    Color confidenceColor = confidence > 0.7 ? Colors.green :
+    confidence > 0.4 ? Colors.orange : Colors.red;
+
+    return Card(
+      child: Padding(
+        padding: EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.analytics, color: confidenceColor, size: 20),
+                SizedBox(width: 8),
+                Text(
+                  'Analysis Quality',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                Spacer(),
+                Container(
+                  padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: confidenceColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: confidenceColor.withOpacity(0.3)),
+                  ),
+                  child: Text(
+                    '${(confidence * 100).toInt()}%',
+                    style: TextStyle(
+                      color: confidenceColor,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+
+            if (validation['issues'] != null && validation['issues'].isNotEmpty) ...[
+              SizedBox(height: 8),
+              ...List<String>.from(validation['issues']).map(
+                    (issue) => Padding(
+                  padding: EdgeInsets.only(bottom: 4),
+                  child: Row(
+                    children: [
+                      Icon(Icons.warning, size: 16, color: Colors.orange),
+                      SizedBox(width: 4),
+                      Expanded(child: Text(issue, style: TextStyle(fontSize: 12))),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -399,6 +726,7 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
     final analysisResult = _currentItem.analysisResult;
     final scrapedSources = analysisResult?['scrapedSources'] as List? ?? [];
     final candidateMatches = analysisResult?['candidateMatches'] as List? ?? [];
+    final rawData = analysisResult?['rawData'] as Map<String, dynamic>?;
 
     return SingleChildScrollView(
       padding: EdgeInsets.all(16),
@@ -419,6 +747,14 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
           ),
 
           SizedBox(height: 24),
+
+          // Enhanced Analysis Sources
+          if (rawData != null && rawData['searchResults'] != null) ...[
+            Text('Enhanced Analysis Sources', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            SizedBox(height: 12),
+            _buildEnhancedSourcesSummary(rawData),
+            SizedBox(height: 24),
+          ],
 
           // Candidate matches for web scraping
           if (candidateMatches.isNotEmpty) ...[
@@ -456,19 +792,19 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
             }).toList(),
           ],
 
-          if (scrapedSources.isEmpty && candidateMatches.isEmpty)
+          if (scrapedSources.isEmpty && candidateMatches.isEmpty && rawData == null)
             Center(
               child: Column(
                 children: [
                   Icon(Icons.web, size: 48, color: Colors.grey[400]),
                   SizedBox(height: 16),
                   Text(
-                    'No web sources available yet',
+                    'No sources available yet',
                     style: TextStyle(color: Colors.grey[600]),
                   ),
                   SizedBox(height: 8),
                   Text(
-                    'Run image searches to find candidate websites for scraping',
+                    'Run enhanced analysis to find authoritative sources',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: Colors.grey[500], fontSize: 12),
                   ),
@@ -476,6 +812,48 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
               ),
             ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildEnhancedSourcesSummary(Map<String, dynamic> rawData) {
+    final searchResults = rawData['searchResults'] as Map<String, dynamic>?;
+    final contentSummary = rawData['scrapedContent'] as Map<String, dynamic>?;
+
+    return Card(
+      child: Padding(
+        padding: EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (searchResults != null) ...[
+              Row(
+                children: [
+                  Icon(Icons.search, color: Colors.blue, size: 16),
+                  SizedBox(width: 4),
+                  Text('Searches: ${searchResults['searchCount'] ?? 0} performed'),
+                ],
+              ),
+              Row(
+                children: [
+                  Icon(Icons.link, color: Colors.green, size: 16),
+                  SizedBox(width: 4),
+                  Text('Results: ${searchResults['resultsFound'] ?? 0} found'),
+                ],
+              ),
+            ],
+            if (contentSummary != null) ...[
+              SizedBox(height: 4),
+              Row(
+                children: [
+                  Icon(Icons.web, color: Colors.orange, size: 16),
+                  SizedBox(width: 4),
+                  Text('Content: ${contentSummary['contentScraped'] ?? 0} sources scraped'),
+                ],
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -510,7 +888,9 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
           PopupMenuButton<String>(
             onSelected: (value) {
               if (value == 'regenerate') {
-               // _regenerateSummary();
+                _regenerateSummary();
+              } else if (value == 'analyze') {
+                _triggerEnhancedAnalysis();
               }
             },
             itemBuilder: (context) => [
@@ -521,10 +901,20 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
                     children: [
                       Icon(Icons.refresh),
                       SizedBox(width: 8),
-                      Text('Regenerate'),
+                      Text('Regenerate Summary'),
                     ],
                   ),
                 ),
+              PopupMenuItem(
+                value: 'analyze',
+                child: Row(
+                  children: [
+                    Icon(Icons.auto_awesome),
+                    SizedBox(width: 8),
+                    Text('Enhanced Analysis'),
+                  ],
+                ),
+              ),
             ],
           ),
         ],
@@ -557,6 +947,7 @@ class _AnalysisResultsScreenState extends State<AnalysisResultsScreen> with Sing
   @override
   void dispose() {
     _tabController.dispose();
+    _refreshTimer?.cancel();
     _disposeControllers();
     super.dispose();
   }
