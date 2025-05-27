@@ -1,5 +1,5 @@
 // ========================================
-// lib/screens/item_screen.dart (Complete Enhanced Version)
+// lib/screens/item_screen.dart
 // ========================================
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -8,10 +8,10 @@ import 'dart:io';
 import '../models/item_job.dart';
 import '../services/storage_service.dart';
 import '../services/cloud_services.dart';
-import '../services/enhanced_analysis_service.dart';
 import 'image_processing_screen.dart';
 import 'analysis_results_screen.dart';
 import 'web_scraper_screen.dart';
+import 'debug_analysis_screen.dart';
 
 class ItemScreen extends StatefulWidget {
   final ItemJob? existingItem; // null for new item, populated for edit
@@ -234,53 +234,21 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
     });
   }
 
-  Future<void> _runEnhancedAnalysis() async {
-    if (_currentItem == null) {
+  Future<void> _runPackagingSearch() async {
+    final packagingImages = _labeledImages
+        .where((img) => img['label'] == 'packaging')
+        .map((img) => img['imagePath'] as String)
+        .toList();
+
+    if (packagingImages.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Please save the item first'),
+          content: Text('No packaging images available'),
           backgroundColor: Colors.orange,
         ),
       );
       return;
     }
-
-    // Show confirmation dialog
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Enhanced Analysis'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('This will perform a comprehensive analysis using:'),
-            SizedBox(height: 8),
-            Text('• OCR text extraction from images'),
-            Text('• Targeted searches for product documentation'),
-            Text('• Content scraping from authoritative sources'),
-            Text('• AI-powered summary generation'),
-            SizedBox(height: 12),
-            Text(
-              'This process may take a few minutes.',
-              style: TextStyle(fontStyle: FontStyle.italic),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text('Start Analysis'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true) return;
 
     // Show loading indicator
     showDialog(
@@ -291,42 +259,642 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
           children: [
             CircularProgressIndicator(),
             SizedBox(width: 20),
-            Text('Starting enhanced analysis...'),
+            Text('Analyzing packaging images...'),
           ],
         ),
       ),
     );
 
     try {
-      // Trigger enhanced analysis
-      EnhancedAnalysisService.triggerBackgroundAnalysis(_currentItem!);
-
+      final results = await CloudServices.searchPackaging(packagingImages);
       Navigator.pop(context); // Close loading dialog
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Enhanced analysis started! Check the analysis results screen for progress.'),
-          backgroundColor: Colors.green,
-          action: SnackBarAction(
-            label: 'VIEW',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => AnalysisResultsScreen(item: _currentItem!),
-                ),
-              );
-            },
-          ),
-        ),
-      );
-
+      _showSearchResults('Packaging Analysis', results);
     } catch (e) {
       Navigator.pop(context); // Close loading dialog
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Error starting enhanced analysis: $e'),
+          content: Text('Error analyzing packaging: $e'),
           backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _runMarkingsSearch() async {
+    final markingImages = _labeledImages
+        .where((img) => img['label'] == 'markings')
+        .map((img) => img['imagePath'] as String)
+        .toList();
+
+    if (markingImages.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No marking images available'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    // Show loading indicator
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Text('Analyzing markings...'),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final results = await CloudServices.searchMarkings(markingImages);
+      Navigator.pop(context); // Close loading dialog
+
+      // Enhance markings results with search candidates
+      if (results['brands'] != null && (results['brands'] as List).isNotEmpty) {
+        List<Map<String, dynamic>> candidates = [];
+
+        for (String brand in (results['brands'] as List).take(3)) {
+          candidates.add({
+            'title': 'Search eBay for $brand products',
+            'url': 'https://www.ebay.com/sch/i.html?_nkw=${Uri.encodeComponent(brand)}',
+            'confidence': 0.7,
+            'type': 'brand_search',
+            'site': 'eBay',
+            'searchTerm': brand,
+          });
+        }
+
+        results['candidates'] = candidates;
+      }
+
+      _showSearchResults('Markings Analysis', results);
+    } catch (e) {
+      Navigator.pop(context); // Close loading dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error analyzing markings: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _runReverseImageSearch() async {
+    final idImages = _labeledImages
+        .where((img) => img['label'] == 'id')
+        .map((img) => img['imagePath'] as String)
+        .toList();
+
+    if (idImages.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No ID images available'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    // Show loading indicator
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Text('Searching with image recognition...'),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final results = await CloudServices.reverseImageSearchWithCandidates(idImages);
+      Navigator.pop(context); // Close loading dialog
+      _showSearchResults('Reverse Image Search', results);
+    } catch (e) {
+      Navigator.pop(context); // Close loading dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error in reverse search: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _runBarcodeSearch() async {
+    final barcodeImages = _labeledImages
+        .where((img) => img['label'] == 'barcode')
+        .map((img) => img['imagePath'] as String)
+        .toList();
+
+    if (barcodeImages.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No barcode images available'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    // Show loading indicator
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Text('Scanning barcodes...'),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final barcodeResults = await CloudServices.detectBarcodesAndUPCs(barcodeImages);
+      Navigator.pop(context); // Close loading dialog
+
+      List<Map<String, dynamic>> candidates = [];
+
+      // Create candidates from detected barcodes
+      final allCodes = [...barcodeResults['barcodes']!, ...barcodeResults['upcs']!];
+
+      for (String code in allCodes.take(5)) {
+        candidates.add({
+          'title': 'UPC Database: $code',
+          'url': 'https://www.upcitemdb.com/upc/$code',
+          'confidence': 0.9,
+          'type': 'barcode_lookup',
+          'site': 'UPC Database',
+          'searchTerm': code,
+        });
+
+        candidates.add({
+          'title': 'eBay Search: $code',
+          'url': 'https://www.ebay.com/sch/i.html?_nkw=${Uri.encodeComponent(code)}',
+          'confidence': 0.8,
+          'type': 'barcode_search',
+          'site': 'eBay',
+          'searchTerm': code,
+        });
+      }
+
+      final results = {
+        'confidence': allCodes.isNotEmpty ? 0.9 : 0.1,
+        'barcodes': barcodeResults['barcodes'],
+        'upcs': barcodeResults['upcs'],
+        'candidates': candidates,
+        'text': 'Found ${allCodes.length} barcodes/UPCs',
+      };
+
+      _showSearchResults('Barcode Scan Results', results);
+    } catch (e) {
+      Navigator.pop(context); // Close loading dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error scanning barcodes: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  void _showSearchResults(String title, Map<String, dynamic> results) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        builder: (context, scrollController) => Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: Column(
+            children: [
+              // Handle bar
+              Container(
+                margin: EdgeInsets.symmetric(vertical: 12),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+
+              // Header
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 20),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          Text(
+                            'Confidence: ${(results['confidence'] * 100).toInt()}% • Found ${(results['candidates'] as List?)?.length ?? 0} candidates',
+                            style: TextStyle(
+                              color: Colors.grey[600],
+                              fontSize: 14,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(context),
+                      icon: Icon(Icons.close),
+                    ),
+                  ],
+                ),
+              ),
+
+              Divider(),
+
+              // Content
+              Expanded(
+                child: SingleChildScrollView(
+                  controller: scrollController,
+                  padding: EdgeInsets.all(20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Extracted data summary
+                      if (results['text'] != null && results['text'].toString().isNotEmpty) ...[
+                        _buildSectionHeader('Extracted Text', Icons.text_fields),
+                        Card(
+                          child: Padding(
+                            padding: EdgeInsets.all(12),
+                            child: Text(
+                              results['text'].toString().length > 200
+                                  ? '${results['text'].toString().substring(0, 200)}...'
+                                  : results['text'].toString(),
+                              style: TextStyle(fontSize: 13),
+                            ),
+                          ),
+                        ),
+                        SizedBox(height: 20),
+                      ],
+
+                      // Products found
+                      if (results['products'] != null && (results['products'] as List).isNotEmpty) ...[
+                        _buildSectionHeader('Products Identified', Icons.inventory),
+                        ...List.generate(
+                          (results['products'] as List).length,
+                              (index) => Card(
+                            child: ListTile(
+                              leading: Icon(Icons.check_circle, color: Colors.green),
+                              title: Text(results['products'][index]),
+                              dense: true,
+                            ),
+                          ),
+                        ),
+                        SizedBox(height: 20),
+                      ],
+
+                      // Candidate sources with USE buttons
+                      if (results['candidates'] != null && (results['candidates'] as List).isNotEmpty) ...[
+                        _buildSectionHeader('Web Sources to Review', Icons.public),
+                        ...List.generate(
+                          (results['candidates'] as List).length,
+                              (index) => _buildCandidateCard(
+                            (results['candidates'] as List)[index],
+                            context,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSectionHeader(String title, IconData icon) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: Colors.blue[700]),
+          SizedBox(width: 8),
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: Colors.blue[700],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCandidateCard(Map<String, dynamic> candidate, BuildContext context) {
+    final confidence = candidate['confidence'] ?? 0.0;
+    final title = candidate['title'] ?? 'Unknown Source';
+    final site = candidate['site'] ?? 'Unknown';
+    final type = candidate['type'] ?? 'unknown';
+    final url = candidate['url'] ?? '';
+
+    Color confidenceColor = confidence > 0.7 ? Colors.green :
+    confidence > 0.4 ? Colors.orange : Colors.red;
+
+    IconData typeIcon;
+    Color cardColor;
+
+    switch (type) {
+      case 'product_page':
+        typeIcon = Icons.shopping_bag;
+        cardColor = Colors.blue;
+        break;
+      case 'barcode_lookup':
+        typeIcon = Icons.qr_code;
+        cardColor = Colors.green;
+        break;
+      case 'brand_model_search':
+        typeIcon = Icons.search;
+        cardColor = Colors.purple;
+        break;
+      case 'similar_image':
+        typeIcon = Icons.image;
+        cardColor = Colors.orange;
+        break;
+      default:
+        typeIcon = Icons.link;
+        cardColor = Colors.grey;
+    }
+
+    return Card(
+      margin: EdgeInsets.only(bottom: 12),
+      elevation: 2,
+      child: Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: cardColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: cardColor.withOpacity(0.3)),
+                  ),
+                  child: Icon(typeIcon, size: 20, color: cardColor),
+                ),
+                SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 15,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Container(
+                            padding: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: confidenceColor.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: confidenceColor.withOpacity(0.3)),
+                            ),
+                            child: Text(
+                              '${(confidence * 100).toInt()}%',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: confidenceColor,
+                              ),
+                            ),
+                          ),
+                          SizedBox(width: 8),
+                          Container(
+                            padding: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.grey[100],
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              site,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey[700],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+
+            SizedBox(height: 12),
+
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(context); // Close the modal first
+                      _openWebScraper(url, title);
+                    },
+                    icon: Icon(Icons.public, size: 16),
+                    label: Text('VIEW SITE'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.blue[700],
+                      side: BorderSide(color: Colors.blue[300]!),
+                    ),
+                  ),
+                ),
+                SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(context); // Close the modal first
+                      _openWebScraperWithAutoScrape(url, title);
+                    },
+                    icon: Icon(Icons.download, size: 16),
+                    label: Text('USE DATA'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green[600],
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _openWebScraper(String url, String title) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => WebScraperScreen(
+          url: url,
+          title: title,
+          onDataScrapped: (scrapedData) {
+            _addScrapedData(scrapedData);
+          },
+        ),
+      ),
+    );
+  }
+
+  void _openWebScraperWithAutoScrape(String url, String title) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => WebScraperScreen(
+          url: url,
+          title: title,
+          onDataScrapped: (scrapedData) {
+            _addScrapedData(scrapedData);
+          },
+        ),
+      ),
+    );
+  }
+
+  void _addScrapedData(Map<String, dynamic> scrapedData) {
+    if (_currentItem == null) return;
+
+    // Add scraped data to item's analysis result
+    Map<String, dynamic> updatedAnalysisResult = Map.from(_currentItem!.analysisResult ?? {});
+
+    if (!updatedAnalysisResult.containsKey('scrapedSources')) {
+      updatedAnalysisResult['scrapedSources'] = [];
+    }
+
+    updatedAnalysisResult['scrapedSources'].add({
+      'timestamp': DateTime.now().toIso8601String(),
+      'data': scrapedData,
+    });
+
+    final updatedItem = _currentItem!.copyWith(analysisResult: updatedAnalysisResult);
+    StorageService.saveJob(updatedItem);
+
+    setState(() {
+      _currentItem = updatedItem;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('✅ Data scraped: ${scrapedData['title'] ?? 'Unknown source'}'),
+        backgroundColor: Colors.green,
+        action: SnackBarAction(
+          label: 'VIEW',
+          textColor: Colors.white,
+          onPressed: () {
+            _showScrapedDataSummary(scrapedData);
+          },
+        ),
+      ),
+    );
+  }
+
+  void _showScrapedDataSummary(Map<String, dynamic> data) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Scraped Data Summary'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (data['title'] != null) ...[
+                Text('Title:', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text(data['title']),
+                SizedBox(height: 8),
+              ],
+              if (data['prices'] != null && (data['prices'] as List).isNotEmpty) ...[
+                Text('Prices Found:', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text('${(data['prices'] as List).length} prices'),
+                SizedBox(height: 8),
+              ],
+              if (data['specifications'] != null && (data['specifications'] as List).isNotEmpty) ...[
+                Text('Specifications:', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text('${(data['specifications'] as List).length} specs'),
+                SizedBox(height: 8),
+              ],
+              if (data['dataQuality'] != null) ...[
+                Text('Data Quality:', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text(data['dataQuality']['overallQuality'] ?? 'Unknown'),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _openDebugAnalysis() {
+    // Save current item first if there are unsaved changes
+    if (_hasUnsavedChanges) {
+      _saveItem().then((_) {
+        if (_currentItem != null) {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => DebugAnalysisScreen(item: _currentItem!),
+            ),
+          );
+        }
+      });
+    } else {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => DebugAnalysisScreen(item: _currentItem ?? widget.existingItem!),
         ),
       );
     }
@@ -428,42 +996,8 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
         SnackBar(content: Text(_isEditMode ? 'Item updated successfully' : 'Item created successfully')),
       );
 
-      // For new items, offer to start enhanced analysis
+      // Navigate to analysis results if this is a new item
       if (!_isEditMode) {
-        final startAnalysis = await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: Text('Item Created Successfully'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text('Would you like to start enhanced analysis now?'),
-                SizedBox(height: 8),
-                Text(
-                  'This will provide detailed product information and pricing.',
-                  style: TextStyle(color: Colors.grey[600], fontSize: 12),
-                ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: Text('Later'),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: Text('Start Analysis'),
-              ),
-            ],
-          ),
-        );
-
-        if (startAnalysis == true) {
-          // Trigger enhanced analysis
-          EnhancedAnalysisService.triggerBackgroundAnalysis(item);
-        }
-
-        // Navigate to analysis results
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
@@ -483,6 +1017,76 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
     }
   }
 
+  Future<void> _regenerateSummary() async {
+    if (_currentItem == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Regenerate Summary'),
+        content: Text('This will regenerate the summary from source data. Continue?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Regenerate'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    setState(() => _isProcessing = true);
+
+    try {
+      // This would call the summary generation service
+      // For now, just show a message
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Summary regeneration coming soon')),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error regenerating summary: $e')),
+      );
+    } finally {
+      setState(() => _isProcessing = false);
+    }
+  }
+
+  void _addSpecification() {
+    setState(() {
+      _specControllers.add(TextEditingController());
+      _hasUnsavedChanges = true;
+    });
+  }
+
+  void _removeSpecification(int index) {
+    setState(() {
+      _specControllers[index].dispose();
+      _specControllers.removeAt(index);
+      _hasUnsavedChanges = true;
+    });
+  }
+
+  void _addFeature() {
+    setState(() {
+      _featureControllers.add(TextEditingController());
+      _hasUnsavedChanges = true;
+    });
+  }
+
+  void _removeFeature(int index) {
+    setState(() {
+      _featureControllers[index].dispose();
+      _featureControllers.removeAt(index);
+      _hasUnsavedChanges = true;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -495,6 +1099,20 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
             TextButton(
               onPressed: _isProcessing ? null : _saveItem,
               child: Text('SAVE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+          if (_isEditMode && _hasSummaryData)
+            PopupMenuButton<String>(
+              onSelected: (value) {
+                if (value == 'regenerate') {
+                  _regenerateSummary();
+                }
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem(
+                  value: 'regenerate',
+                  child: Row(children: [Icon(Icons.refresh), SizedBox(width: 8), Text('Regenerate Summary')]),
+                ),
+              ],
             ),
         ],
         bottom: TabBar(
@@ -764,9 +1382,57 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
               ),
             )
           else ...[
-            // Enhanced Analysis Card
+            Text(
+              'Quick Searches',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            SizedBox(height: 16),
+
+            // Search buttons grid
+            GridView.count(
+              shrinkWrap: true,
+              physics: NeverScrollableScrollPhysics(),
+              crossAxisCount: 2,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: 1.5,
+              children: [
+                _buildSearchButton(
+                  'Packaging\nSearch',
+                  Icons.inventory_2,
+                  Colors.purple,
+                  _runPackagingSearch,
+                  _labeledImages.any((img) => img['label'] == 'packaging'),
+                ),
+                _buildSearchButton(
+                  'Markings\nSearch',
+                  Icons.label,
+                  Colors.orange,
+                  _runMarkingsSearch,
+                  _labeledImages.any((img) => img['label'] == 'markings'),
+                ),
+                _buildSearchButton(
+                  'Reverse\nSearch',
+                  Icons.search,
+                  Colors.blue,
+                  _runReverseImageSearch,
+                  _labeledImages.any((img) => img['label'] == 'id'),
+                ),
+                _buildSearchButton(
+                  'Barcode\nScan',
+                  Icons.qr_code,
+                  Colors.red,
+                  _runBarcodeSearch,
+                  _labeledImages.any((img) => img['label'] == 'barcode'),
+                ),
+              ],
+            ),
+
+            SizedBox(height: 24),
+
+            // Debug Analysis Section
             Card(
-              color: Colors.blue[50],
+              color: Colors.amber[50],
               child: Padding(
                 padding: EdgeInsets.all(16),
                 child: Column(
@@ -774,53 +1440,118 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
                   children: [
                     Row(
                       children: [
-                        Icon(Icons.auto_awesome, color: Colors.blue[700]),
+                        Icon(Icons.bug_report, color: Colors.amber[700]),
                         SizedBox(width: 8),
                         Text(
-                          'Enhanced Analysis',
+                          'Debug & Testing',
                           style: TextStyle(
-                            fontSize: 18,
+                            fontSize: 16,
                             fontWeight: FontWeight.bold,
-                            color: Colors.blue[700],
+                            color: Colors.amber[700],
                           ),
                         ),
                       ],
                     ),
                     SizedBox(height: 8),
                     Text(
-                      'Get comprehensive product information using AI-powered analysis.',
-                      style: TextStyle(color: Colors.grey[700]),
+                      'Test individual search functions and view detailed logs',
+                      style: TextStyle(color: Colors.grey[600]),
                     ),
                     SizedBox(height: 12),
                     Container(
                       width: double.infinity,
                       child: ElevatedButton.icon(
-                        onPressed: _currentItem != null ? _runEnhancedAnalysis : null,
-                        icon: Icon(Icons.psychology),
-                        label: Text('Start Enhanced Analysis'),
+                        onPressed: () => _openDebugAnalysis(),
+                        icon: Icon(Icons.science),
+                        label: Text('OPEN DEBUG ANALYSIS'),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blue[600],
+                          backgroundColor: Colors.amber[600],
                           foregroundColor: Colors.white,
                           padding: EdgeInsets.symmetric(vertical: 12),
                         ),
                       ),
                     ),
-                    if (_currentItem == null)
-                      Padding(
-                        padding: EdgeInsets.only(top: 8),
-                        child: Text(
-                          'Save the item first to enable enhanced analysis',
-                          style: TextStyle(
-                            color: Colors.orange[700],
-                            fontSize: 12,
-                            fontStyle: FontStyle.italic,
-                          ),
-                        ),
-                      ),
                   ],
                 ),
               ),
             ),
+
+            SizedBox(height: 16),
+
+            // Image classification summary
+            Card(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Image Classification Summary',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    SizedBox(height: 12),
+                    ..._getImageClassificationSummary().entries.map((entry) {
+                      return Padding(
+                        padding: EdgeInsets.symmetric(vertical: 4),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 12,
+                              height: 12,
+                              decoration: BoxDecoration(
+                                color: _getLabelColor(entry.key),
+                                borderRadius: BorderRadius.circular(2),
+                              ),
+                            ),
+                            SizedBox(width: 8),
+                            Text('${entry.key.toUpperCase()}: ${entry.value} images'),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                  ],
+                ),
+              ),
+            ),
+
+            // Show scraped data if available
+            if (_currentItem?.analysisResult?['scrapedSources'] != null) ...[
+              SizedBox(height: 16),
+              Card(
+                child: Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Scraped Data Sources',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                      SizedBox(height: 8),
+                      Text(
+                        '${(_currentItem!.analysisResult!['scrapedSources'] as List).length} data sources collected',
+                        style: TextStyle(color: Colors.green[700]),
+                      ),
+                      SizedBox(height: 12),
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          // TODO: Implement analyze function
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('AI Analysis coming soon!')),
+                          );
+                        },
+                        icon: Icon(Icons.auto_awesome),
+                        label: Text('ANALYZE WITH AI'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.purple[600],
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ],
 
           SizedBox(height: 24),
@@ -899,8 +1630,8 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
           TextFormField(
             controller: _estimatedValueController,
             decoration: InputDecoration(
-              border: OutlineInputBorder(),
-              prefixText: '\$',
+                border: OutlineInputBorder(),
+                prefixText: '\$',
             ),
             keyboardType: TextInputType.numberWithOptions(decimal: true),
             onChanged: (_) => _onTextChanged(),
@@ -990,34 +1721,36 @@ class _ItemScreenState extends State<ItemScreen> with SingleTickerProviderStateM
     );
   }
 
-  void _addSpecification() {
-    setState(() {
-      _specControllers.add(TextEditingController());
-      _hasUnsavedChanges = true;
-    });
+  Widget _buildSearchButton(String title, IconData icon, Color color, VoidCallback onPressed, bool hasRequiredImages) {
+    return ElevatedButton(
+      onPressed: hasRequiredImages ? onPressed : null,
+      style: ElevatedButton.styleFrom(
+        backgroundColor: hasRequiredImages ? color : Colors.grey[300],
+        foregroundColor: hasRequiredImages ? Colors.white : Colors.grey[600],
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 24),
+          SizedBox(height: 8),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
+    );
   }
 
-  void _removeSpecification(int index) {
-    setState(() {
-      _specControllers[index].dispose();
-      _specControllers.removeAt(index);
-      _hasUnsavedChanges = true;
-    });
-  }
-
-  void _addFeature() {
-    setState(() {
-      _featureControllers.add(TextEditingController());
-      _hasUnsavedChanges = true;
-    });
-  }
-
-  void _removeFeature(int index) {
-    setState(() {
-      _featureControllers[index].dispose();
-      _featureControllers.removeAt(index);
-      _hasUnsavedChanges = true;
-    });
+  Map<String, int> _getImageClassificationSummary() {
+    Map<String, int> summary = {};
+    for (var image in _labeledImages) {
+      final label = image['label']!;
+      summary[label] = (summary[label] ?? 0) + 1;
+    }
+    return summary;
   }
 
   void _disposeControllers() {
