@@ -15,505 +15,485 @@ class _EnhancedSettingsScreenState extends State<EnhancedSettingsScreen> {
   final _openAiApiKeyController = TextEditingController();
   final _searchEngineIdController = TextEditingController();
 
+  bool _googleApiKeyVisible = false;
+  bool _openAiApiKeyVisible = false;
+  bool _searchEngineIdVisible = false;
+
+  bool _isLoading = false;
+  bool _isTesting = false;
   Map<String, bool> _apiStatus = {};
-  bool _isLoading = true;
-  bool _showApiKeys = false;
+  Map<String, dynamic> _testResults = {};
 
   @override
   void initState() {
     super.initState();
     _loadCurrentSettings();
+    _checkApiStatus();
   }
 
   Future<void> _loadCurrentSettings() async {
-    setState(() => _isLoading = true);
-
     final googleApiKey = await ApiConfigService.getGoogleApiKey();
     final openAiApiKey = await ApiConfigService.getOpenAiApiKey();
     final searchEngineId = await ApiConfigService.getGoogleSearchEngineId();
 
-    _googleApiKeyController.text = googleApiKey ?? '';
-    _openAiApiKeyController.text = openAiApiKey ?? '';
-    _searchEngineIdController.text = searchEngineId ?? '';
+    setState(() {
+      _googleApiKeyController.text = googleApiKey ?? '';
+      _openAiApiKeyController.text = openAiApiKey ?? '';
+      _searchEngineIdController.text = searchEngineId ?? '';
+    });
+  }
 
+  Future<void> _checkApiStatus() async {
     final status = await ApiConfigService.getApiStatus();
-
     setState(() {
       _apiStatus = status;
-      _isLoading = false;
     });
   }
 
   Future<void> _saveSettings() async {
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+    });
 
     try {
       await ApiConfigService.setGoogleApiKey(_googleApiKeyController.text.trim());
       await ApiConfigService.setOpenAiApiKey(_openAiApiKeyController.text.trim());
       await ApiConfigService.setGoogleSearchEngineId(_searchEngineIdController.text.trim());
 
+      await _checkApiStatus();
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Settings saved successfully!'),
+          content: Text('✅ Settings saved successfully'),
           backgroundColor: Colors.green,
         ),
       );
 
-      await _loadCurrentSettings();
+      Navigator.pop(context, true); // Return true to indicate settings were saved
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Error saving settings: $e'),
+          content: Text('❌ Error saving settings: $e'),
           backgroundColor: Colors.red,
         ),
       );
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _testApiConnections() async {
+    setState(() {
+      _isTesting = true;
+      _testResults = {};
+    });
+
+    try {
+      final results = await ApiConfigService.testApiConnections();
+      setState(() {
+        _testResults = results;
+      });
+
+      // Show test results dialog
+      _showTestResultsDialog();
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Error testing APIs: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      setState(() {
+        _isTesting = false;
+      });
+    }
+  }
+
+  void _showTestResultsDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('🧪 API Test Results'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildTestResultItem('Google Vision API', _testResults['googleVisionApi']),
+              SizedBox(height: 12),
+              _buildTestResultItem('OpenAI API', _testResults['openAiApi']),
+              SizedBox(height: 12),
+              _buildTestResultItem('Google Search API', _testResults['googleSearchApi']),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTestResultItem(String apiName, Map<String, dynamic>? result) {
+    if (result == null) {
+      return Row(
+        children: [
+          Icon(Icons.help, color: Colors.grey),
+          SizedBox(width: 8),
+          Text('$apiName: No data'),
+        ],
+      );
     }
 
-    setState(() => _isLoading = false);
-  }
+    final isConfigured = result['configured'] ?? false;
+    final message = result['message'] ?? 'Unknown status';
+    final hasError = result['error'] != null;
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Enhanced Analysis Settings'),
-        actions: [
-          IconButton(
-            icon: Icon(Icons.save),
-            onPressed: _isLoading ? null : _saveSettings,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(
+              isConfigured
+                  ? (hasError ? Icons.warning : Icons.check_circle)
+                  : Icons.error,
+              color: isConfigured
+                  ? (hasError ? Colors.orange : Colors.green)
+                  : Colors.red,
+            ),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '$apiName:',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        Padding(
+          padding: EdgeInsets.only(left: 32),
+          child: Text(
+            message,
+            style: TextStyle(fontSize: 12, color: Colors.grey[600]),
           ),
-        ],
-      ),
-      body: _isLoading
-          ? Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-        padding: EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildOverviewCard(),
-            SizedBox(height: 16),
-            _buildApiStatusCard(),
-            SizedBox(height: 16),
-            _buildApiConfigurationCard(),
-            SizedBox(height: 16),
-            _buildUsageGuidelinesCard(),
-          ],
         ),
-      ),
-    );
-  }
-
-  Widget _buildOverviewCard() {
-    return Card(
-      child: Padding(
-        padding: EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.auto_awesome, color: Colors.blue),
-                SizedBox(width: 8),
-                Text(
-                  'Enhanced Analysis System',
-                  style: Theme.of(context).textTheme.headlineSmall,
-                ),
-              ],
-            ),
-            SizedBox(height: 12),
-            Text(
-              'The enhanced analysis system uses targeted searches to find official product documentation, specifications, and pricing data. This provides much more accurate and comprehensive results than basic web scraping.',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-            SizedBox(height: 12),
-            Container(
-              padding: EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.blue.shade50,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.blue.shade200),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'How it works:',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  SizedBox(height: 8),
-                  Text('1. OCR extracts manufacturer + model from your images'),
-                  Text('2. Targeted searches find official datasheets and manuals'),
-                  Text('3. Content is scraped from high-value sources'),
-                  Text('4. AI generates comprehensive product summaries'),
-                  Text('5. Pricing data is collected from multiple retailers'),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildApiStatusCard() {
-    return Card(
-      child: Padding(
-        padding: EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'API Status',
-              style: Theme.of(context).textTheme.headlineSmall,
-            ),
-            SizedBox(height: 12),
-            _buildStatusRow(
-              'Google Vision API (OCR)',
-              _apiStatus['googleVisionApi'] ?? false,
-              'Required for text extraction from images',
-            ),
-            _buildStatusRow(
-              'OpenAI API (AI Summaries)',
-              _apiStatus['openAiApi'] ?? false,
-              'Optional: Enables AI-generated summaries',
-            ),
-            _buildStatusRow(
-              'Google Search API',
-              _apiStatus['googleSearchApi'] ?? false,
-              'Required for targeted product searches',
-            ),
-            SizedBox(height: 12),
-            Container(
-              padding: EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: _apiStatus['allConfigured'] == true
-                    ? Colors.green.shade50
-                    : Colors.orange.shade50,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color: _apiStatus['allConfigured'] == true
-                      ? Colors.green.shade200
-                      : Colors.orange.shade200,
-                ),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    _apiStatus['allConfigured'] == true
-                        ? Icons.check_circle
-                        : Icons.warning,
-                    color: _apiStatus['allConfigured'] == true
-                        ? Colors.green
-                        : Colors.orange,
-                  ),
-                  SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _apiStatus['allConfigured'] == true
-                          ? 'All APIs configured! Enhanced analysis is ready.'
-                          : 'Configure missing APIs to enable enhanced analysis.',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStatusRow(String title, bool configured, String description) {
-    return Padding(
-      padding: EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          Icon(
-            configured ? Icons.check_circle : Icons.radio_button_unchecked,
-            color: configured ? Colors.green : Colors.grey,
-            size: 20,
-          ),
-          SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: TextStyle(fontWeight: FontWeight.w500),
-                ),
-                Text(
-                  description,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade600,
-                  ),
-                ),
-              ],
+        if (hasError)
+          Padding(
+            padding: EdgeInsets.only(left: 32),
+            child: Text(
+              'Error: ${result['error']}',
+              style: TextStyle(fontSize: 12, color: Colors.red),
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildApiConfigurationCard() {
-    return Card(
-      child: Padding(
-        padding: EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'API Configuration',
-                  style: Theme.of(context).textTheme.headlineSmall,
-                ),
-                Row(
-                  children: [
-                    IconButton(
-                      icon: Icon(_showApiKeys ? Icons.visibility_off : Icons.visibility),
-                      onPressed: () => setState(() => _showApiKeys = !_showApiKeys),
-                      tooltip: _showApiKeys ? 'Hide API keys' : 'Show API keys',
-                    ),
-                    IconButton(
-                      icon: Icon(Icons.info_outline),
-                      onPressed: _showSetupInstructions,
-                      tooltip: 'Setup instructions',
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            SizedBox(height: 16),
-
-            // Google API Key
-            _buildApiKeyField(
-              controller: _googleApiKeyController,
-              label: 'Google API Key',
-              hint: 'AIza...',
-              validator: ApiConfigService.validateGoogleApiKey,
-              description: 'Used for Vision API (OCR) and Search API',
-            ),
-
-            SizedBox(height: 16),
-
-            // OpenAI API Key
-            _buildApiKeyField(
-              controller: _openAiApiKeyController,
-              label: 'OpenAI API Key (Optional)',
-              hint: 'sk-...',
-              validator: ApiConfigService.validateOpenAiApiKey,
-              description: 'Enables AI-generated summaries (has usage costs)',
-            ),
-
-            SizedBox(height: 16),
-
-            // Google Search Engine ID
-            _buildApiKeyField(
-              controller: _searchEngineIdController,
-              label: 'Google Search Engine ID',
-              hint: 'Custom Search Engine ID',
-              validator: ApiConfigService.validateGoogleSearchEngineId,
-              description: 'Custom Search Engine for targeted searches',
-            ),
-
-            SizedBox(height: 16),
-
-            ElevatedButton.icon(
-              onPressed: _isLoading ? null : _saveSettings,
-              icon: Icon(Icons.save),
-              label: Text('Save Configuration'),
-              style: ElevatedButton.styleFrom(
-                minimumSize: Size(double.infinity, 48),
-              ),
-            ),
-          ],
-        ),
-      ),
+      ],
     );
   }
 
   Widget _buildApiKeyField({
-    required TextEditingController controller,
     required String label,
     required String hint,
-    required bool Function(String) validator,
-    required String description,
+    required TextEditingController controller,
+    required bool isVisible,
+    required VoidCallback onToggleVisibility,
+    String? Function(String?)? validator,
   }) {
-    final isValid = controller.text.isEmpty || validator(controller.text);
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           label,
-          style: TextStyle(fontWeight: FontWeight.w500),
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
         ),
-        SizedBox(height: 4),
+        SizedBox(height: 8),
         TextFormField(
           controller: controller,
-          obscureText: !_showApiKeys,
+          obscureText: !isVisible,
+          validator: validator,
           decoration: InputDecoration(
             hintText: hint,
             border: OutlineInputBorder(),
-            suffixIcon: controller.text.isNotEmpty
-                ? Icon(
-              isValid ? Icons.check_circle : Icons.error,
-              color: isValid ? Colors.green : Colors.red,
-            )
-                : null,
-            errorText: !isValid ? 'Invalid format' : null,
+            suffixIcon: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  icon: Icon(isVisible ? Icons.visibility_off : Icons.visibility),
+                  onPressed: onToggleVisibility,
+                  tooltip: isVisible ? 'Hide key' : 'Show key',
+                ),
+                IconButton(
+                  icon: Icon(Icons.copy),
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: controller.text));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('📋 Copied to clipboard')),
+                    );
+                  },
+                  tooltip: 'Copy to clipboard',
+                ),
+              ],
+            ),
           ),
-          onChanged: (value) => setState(() {}),
+          maxLines: 1,
         ),
         SizedBox(height: 4),
         Text(
-          description,
+          _getKeyValidationStatus(controller.text, validator),
           style: TextStyle(
             fontSize: 12,
-            color: Colors.grey.shade600,
+            color: _getKeyValidationColor(controller.text, validator),
           ),
         ),
       ],
     );
   }
 
-  Widget _buildUsageGuidelinesCard() {
-    final guidelines = ApiConfigService.getUsageGuidelines();
+  String _getKeyValidationStatus(String value, String? Function(String?)? validator) {
+    if (value.isEmpty) return 'Not configured';
+    if (validator != null) {
+      final error = validator(value);
+      if (error != null) return error;
+    }
+    return '✅ Valid format';
+  }
 
-    return Card(
-      child: Padding(
-        padding: EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Usage Guidelines & Costs',
-              style: Theme.of(context).textTheme.headlineSmall,
+  Color _getKeyValidationColor(String value, String? Function(String?)? validator) {
+    if (value.isEmpty) return Colors.grey;
+    if (validator != null) {
+      final error = validator(value);
+      if (error != null) return Colors.red;
+    }
+    return Colors.green;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('🔧 Enhanced Settings'),
+        backgroundColor: Colors.blue[600],
+        foregroundColor: Colors.white,
+        actions: [
+          if (!_isTesting)
+            IconButton(
+              icon: Icon(Icons.science),
+              onPressed: _testApiConnections,
+              tooltip: 'Test API Connections',
             ),
-            SizedBox(height: 12),
-
-            // Google Vision API
-            _buildUsageSection(
-              'Google Vision API',
-              guidelines['googleVisionApi']!,
-              Icons.visibility,
-              Colors.blue,
-            ),
-
-            SizedBox(height: 12),
-
-            // OpenAI API
-            _buildUsageSection(
-              'OpenAI API',
-              guidelines['openAiApi']!,
-              Icons.psychology,
-              Colors.green,
-            ),
-
-            SizedBox(height: 12),
-
-            // Google Search API
-            _buildUsageSection(
-              'Google Search API',
-              guidelines['googleSearchApi']!,
-              Icons.search,
-              Colors.orange,
-            ),
-
-            SizedBox(height: 16),
-
-            Container(
-              padding: EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.amber.shade50,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.amber.shade200),
+          if (_isTesting)
+            Padding(
+              padding: EdgeInsets.all(16),
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
               ),
-              child: Row(
+            ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: EdgeInsets.all(16),
+        child: Form(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // API Status Summary
+              Container(
+                width: double.infinity,
+                padding: EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: (_apiStatus['allConfigured'] ?? false)
+                      ? Colors.green[50]
+                      : Colors.orange[50],
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: (_apiStatus['allConfigured'] ?? false)
+                        ? Colors.green[300]!
+                        : Colors.orange[300]!,
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          (_apiStatus['allConfigured'] ?? false)
+                              ? Icons.check_circle
+                              : Icons.warning,
+                          color: (_apiStatus['allConfigured'] ?? false)
+                              ? Colors.green[700]
+                              : Colors.orange[700],
+                        ),
+                        SizedBox(width: 8),
+                        Text(
+                          (_apiStatus['allConfigured'] ?? false)
+                              ? 'All APIs Configured'
+                              : 'API Configuration Needed',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: (_apiStatus['allConfigured'] ?? false)
+                                ? Colors.green[800]
+                                : Colors.orange[800],
+                          ),
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      'Google Vision: ${(_apiStatus['googleVisionApi'] ?? false) ? "✅" : "❌"}',
+                      style: TextStyle(fontSize: 14),
+                    ),
+                    Text(
+                      'OpenAI API: ${(_apiStatus['openAiApi'] ?? false) ? "✅" : "❌"}',
+                      style: TextStyle(fontSize: 14),
+                    ),
+                    Text(
+                      'Google Search: ${(_apiStatus['googleSearchApi'] ?? false) ? "✅" : "❌"}',
+                      style: TextStyle(fontSize: 14),
+                    ),
+                  ],
+                ),
+              ),
+
+              SizedBox(height: 24),
+
+              // Google API Key
+              _buildApiKeyField(
+                label: '🔍 Google API Key',
+                hint: 'AIzaSyC...',
+                controller: _googleApiKeyController,
+                isVisible: _googleApiKeyVisible,
+                onToggleVisibility: () {
+                  setState(() {
+                    _googleApiKeyVisible = !_googleApiKeyVisible;
+                  });
+                },
+                validator: (value) {
+                  if (value == null || value.isEmpty) return 'Required for Vision & Search APIs';
+                  if (!ApiConfigService.validateGoogleApiKey(value)) {
+                    return 'Invalid format (should start with AIza and be 39 chars)';
+                  }
+                  return null;
+                },
+              ),
+
+              SizedBox(height: 20),
+
+              // OpenAI API Key
+              _buildApiKeyField(
+                label: '🤖 OpenAI API Key',
+                hint: 'sk-...',
+                controller: _openAiApiKeyController,
+                isVisible: _openAiApiKeyVisible,
+                onToggleVisibility: () {
+                  setState(() {
+                    _openAiApiKeyVisible = !_openAiApiKeyVisible;
+                  });
+                },
+                validator: (value) {
+                  if (value == null || value.isEmpty) return 'Required for AI product identification';
+                  if (!ApiConfigService.validateOpenAiApiKey(value)) {
+                    return 'Invalid format (should start with sk- and be 40+ chars)';
+                  }
+                  return null;
+                },
+              ),
+
+              SizedBox(height: 20),
+
+              // Search Engine ID
+              _buildApiKeyField(
+                label: '🔎 Google Search Engine ID',
+                hint: 'abc123...',
+                controller: _searchEngineIdController,
+                isVisible: _searchEngineIdVisible,
+                onToggleVisibility: () {
+                  setState(() {
+                    _searchEngineIdVisible = !_searchEngineIdVisible;
+                  });
+                },
+                validator: (value) {
+                  if (value == null || value.isEmpty) return 'Required for product searches';
+                  if (!ApiConfigService.validateGoogleSearchEngineId(value)) {
+                    return 'Invalid format (should be 10+ alphanumeric chars)';
+                  }
+                  return null;
+                },
+              ),
+
+              SizedBox(height: 32),
+
+              // Action Buttons
+              Row(
                 children: [
-                  Icon(Icons.info, color: Colors.amber.shade700),
-                  SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      'These APIs have usage limits and costs. Monitor your usage in the respective dashboards to avoid unexpected charges.',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: Colors.amber.shade700,
+                    child: ElevatedButton.icon(
+                      onPressed: _isTesting ? null : _testApiConnections,
+                      icon: _isTesting
+                          ? SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                          : Icon(Icons.science),
+                      label: Text(_isTesting ? 'Testing...' : 'Test APIs'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue[600],
+                        foregroundColor: Colors.white,
+                        padding: EdgeInsets.symmetric(vertical: 12),
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 16),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _isLoading ? null : _saveSettings,
+                      icon: _isLoading
+                          ? SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                          : Icon(Icons.save),
+                      label: Text(_isLoading ? 'Saving...' : 'Save Settings'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green[600],
+                        foregroundColor: Colors.white,
+                        padding: EdgeInsets.symmetric(vertical: 12),
                       ),
                     ),
                   ),
                 ],
               ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 
-  Widget _buildUsageSection(
-      String title,
-      Map<String, dynamic> guidelines,
-      IconData icon,
-      Color color,
-      ) {
-    return Container(
-      padding: EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: color.withOpacity(0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(icon, color: color, size: 20),
-              SizedBox(width: 8),
-              Text(
-                title,
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  color: color,
+              SizedBox(height: 16),
+
+              // Setup Instructions Button
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _showSetupInstructions,
+                  icon: Icon(Icons.help_outline),
+                  label: Text('Setup Instructions'),
+                  style: OutlinedButton.styleFrom(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                  ),
                 ),
               ),
             ],
           ),
-          SizedBox(height: 8),
-
-          if (guidelines['freeQuota'] != null)
-            Text('Free quota: ${guidelines['freeQuota']}'),
-
-          if (guidelines['costAfterQuota'] != null)
-            Text('Cost after quota: ${guidelines['costAfterQuota']}'),
-
-          if (guidelines['pricing'] != null)
-            Text('Pricing: ${guidelines['pricing']}'),
-
-          if (guidelines['gpt4Cost'] != null)
-            Text('GPT-4 cost: ${guidelines['gpt4Cost']}'),
-
-          if (guidelines['tips'] != null) ...[
-            SizedBox(height: 8),
-            Text(
-              'Tips:',
-              style: TextStyle(fontWeight: FontWeight.w500),
-            ),
-            ...List<String>.from(guidelines['tips']).map(
-                  (tip) => Padding(
-                padding: EdgeInsets.only(left: 8, top: 2),
-                child: Text('• $tip', style: TextStyle(fontSize: 12)),
-              ),
-            ),
-          ],
-        ],
+        ),
       ),
     );
   }
@@ -524,45 +504,23 @@ class _EnhancedSettingsScreenState extends State<EnhancedSettingsScreen> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('API Setup Instructions'),
+        title: Text('📖 API Setup Instructions'),
         content: SingleChildScrollView(
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _buildInstructionSection(
-                'Google Vision & Search APIs',
-                instructions['googleVisionApi']!,
-              ),
+              _buildInstructionSection('Google Vision API', instructions['googleVisionApi']!),
               SizedBox(height: 16),
-              _buildInstructionSection(
-                'Google Custom Search Engine',
-                instructions['googleSearchApi']!,
-              ),
+              _buildInstructionSection('OpenAI API', instructions['openAiApi']!),
               SizedBox(height: 16),
-              _buildInstructionSection(
-                'OpenAI API (Optional)',
-                instructions['openAiApi']!,
-              ),
+              _buildInstructionSection('Google Search API', instructions['googleSearchApi']!),
             ],
           ),
         ),
         actions: [
           TextButton(
-            onPressed: () {
-              Clipboard.setData(ClipboardData(
-                text: 'Google Cloud Console: https://console.cloud.google.com\n'
-                    'Google Custom Search: https://cse.google.com\n'
-                    'OpenAI Platform: https://platform.openai.com',
-              ));
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Links copied to clipboard')),
-              );
-            },
-            child: Text('Copy Links'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
+            onPressed: () => Navigator.pop(context),
             child: Text('Close'),
           ),
         ],
@@ -576,22 +534,12 @@ class _EnhancedSettingsScreenState extends State<EnhancedSettingsScreen> {
       children: [
         Text(
           title,
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-            fontSize: 16,
-          ),
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
         ),
         SizedBox(height: 8),
-        Container(
-          padding: EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: Colors.grey.shade100,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Text(
-            instructions.trim(),
-            style: TextStyle(fontSize: 13),
-          ),
+        Text(
+          instructions,
+          style: TextStyle(fontSize: 14),
         ),
       ],
     );

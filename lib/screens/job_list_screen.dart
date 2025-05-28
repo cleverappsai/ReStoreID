@@ -4,6 +4,7 @@
 import 'package:flutter/material.dart';
 import '../models/item_job.dart';
 import '../services/storage_service.dart';
+import '../services/enhanced_analysis_service.dart';
 import 'item_detail_screen.dart';
 import 'item_screen.dart';
 import 'package:uuid/uuid.dart';
@@ -54,6 +55,83 @@ class _JobListScreenState extends State<JobListScreen> {
     }
   }
 
+  // ✅ ENHANCED ANALYSIS - SAME AS HOME SCREEN
+  Future<void> _runEnhancedAnalysis(ItemJob item) async {
+    try {
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Running Enhanced AI Analysis...'),
+                SizedBox(height: 8),
+                Text(
+                  'This may take 1-2 minutes',
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                ),
+              ],
+            ),
+          );
+        },
+      );
+
+      print('🚀 Starting Enhanced Analysis for item: ${item.id}');
+      print('📝 Item description: ${item.userDescription}');
+      print('🖼️ Images: ${item.images.length}');
+
+      // Use the CORRECT service (not the old mock one)
+      final result = await EnhancedAnalysisService.performCompleteAnalysis(item);
+
+      // Close loading dialog
+      Navigator.of(context).pop();
+
+      print('✅ Enhanced Analysis completed successfully');
+      print('📊 Results summary: ${result.keys.toList()}');
+
+      // Update item with results
+      final updatedItem = item.copyWith(
+        analysisResult: result,
+      );
+      await StorageService.saveJob(updatedItem);
+
+      // Refresh the list
+      _loadItems();
+
+      // Show success message
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Enhanced Analysis completed successfully!'),
+          backgroundColor: Colors.green,
+          duration: Duration(seconds: 3),
+        ),
+      );
+
+      // Navigate to item detail to see results
+      _navigateToItemDetail(updatedItem);
+
+    } catch (e, stackTrace) {
+      // Close loading dialog if open
+      Navigator.of(context, rootNavigator: true).pop();
+
+      print('❌ Enhanced Analysis failed: $e');
+      print('📍 Stack trace: $stackTrace');
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Analysis failed: $e'),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
   void _showItemOptionsMenu(ItemJob item) {
     showModalBottomSheet(
       context: context,
@@ -82,11 +160,21 @@ class _JobListScreenState extends State<JobListScreen> {
                 Navigator.pop(context);
                 final result = await Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (context) => ItemScreen(existingItem: item)), // Pass existing item for edit
+                  MaterialPageRoute(builder: (context) => ItemScreen(existingItem: item)),
                 );
                 if (result != null) {
                   _loadItems();
                 }
+              },
+            ),
+            // ✅ ENHANCED ANALYSIS OPTION - NOW ADDED TO ALL ITEMS SCREEN
+            ListTile(
+              leading: Icon(Icons.psychology, color: Colors.blue),
+              title: Text('Enhanced Analysis'),
+              subtitle: Text('Run AI-Powered analysis'),
+              onTap: () {
+                Navigator.pop(context);
+                _runEnhancedAnalysis(item);
               },
             ),
             ListTile(

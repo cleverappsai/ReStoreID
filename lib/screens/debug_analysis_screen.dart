@@ -2,40 +2,21 @@
 // lib/screens/debug_analysis_screen.dart
 // ========================================
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:flutter/services.dart';
 import 'dart:io';
 import 'dart:convert';
+import 'package:path_provider/path_provider.dart';
 import '../models/item_job.dart';
-import '../services/cloud_services.dart';
+import '../services/enhanced_analysis_service.dart';
 import '../services/targeted_search_service.dart';
-
-enum LogLevel {
-  info,
-  success,
-  warning,
-  error,
-}
-
-class DebugLogEntry {
-  final DateTime timestamp;
-  final String operation;
-  final String message;
-  final LogLevel level;
-  final Map<String, dynamic>? data;
-
-  DebugLogEntry({
-    required this.timestamp,
-    required this.operation,
-    required this.message,
-    required this.level,
-    this.data,
-  });
-}
+import '../services/storage_service.dart';
+import '../services/cloud_services.dart';
+import '../services/ai_product_identification_service.dart';
 
 class DebugAnalysisScreen extends StatefulWidget {
-  final ItemJob item;
+  final ItemJob? item;
 
-  const DebugAnalysisScreen({Key? key, required this.item}) : super(key: key);
+  const DebugAnalysisScreen({Key? key, this.item}) : super(key: key);
 
   @override
   _DebugAnalysisScreenState createState() => _DebugAnalysisScreenState();
@@ -43,467 +24,651 @@ class DebugAnalysisScreen extends StatefulWidget {
 
 class _DebugAnalysisScreenState extends State<DebugAnalysisScreen> {
   final ScrollController _scrollController = ScrollController();
-  List<DebugLogEntry> _debugLogs = [];
-  bool _isRunning = false;
-  String _currentOperation = '';
+  final List<String> _debugLogs = [];
+  bool _isAnalyzing = false;
+  bool _autoScroll = true;
+  String? _logFilePath;
+  ItemJob? _currentItem;
 
   @override
   void initState() {
     super.initState();
-    _addDebugLog('DEBUG SESSION STARTED', 'System initialized for item: ${widget.item.userDescription}', LogLevel.info);
-  }
-
-  void _addDebugLog(String operation, String message, LogLevel level, [Map<String, dynamic>? data]) {
-    setState(() {
-      _debugLogs.add(DebugLogEntry(
-        timestamp: DateTime.now(),
-        operation: operation,
-        message: message,
-        level: level,
-        data: data,
-      ));
-    });
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
-    });
-
-    _saveLogToFile(operation, message, level, data);
-  }
-
-  Future<void> _saveLogToFile(String operation, String message, LogLevel level, [Map<String, dynamic>? data]) async {
-    try {
-      final directory = await getApplicationDocumentsDirectory();
-      final file = File('${directory.path}/debug_analysis_${widget.item.id}.txt');
-
-      final timestamp = DateTime.now().toIso8601String();
-      final logEntry = '[$timestamp] [$level] [$operation] $message\n';
-
-      await file.writeAsString(logEntry, mode: FileMode.append);
-
-      if (data != null) {
-        final dataJson = JsonEncoder.withIndent('  ').convert(data);
-        await file.writeAsString('DATA: $dataJson\n\n', mode: FileMode.append);
-      }
-    } catch (e) {
-      print('Failed to save debug log: $e');
+    _currentItem = widget.item;
+    _initializeLogging();
+    if (_currentItem != null) {
+      _addLog('=== DEBUG ANALYSIS SESSION ===');
+      _addLog('Item: ${_currentItem!.userDescription}');
+      _addLog('Created: ${_currentItem!.createdAt}');
+      _addLog('Images: ${_currentItem!.images.length}');
+      _addLog('Current OCR Results: ${_currentItem!.ocrResults?.isNotEmpty == true ? "Available (${_currentItem!.ocrResults!.length} images)" : "None"}');
+      _addLog('================================\n');
     }
   }
 
-  Future<void> _runPackagingSearch() async {
-    if (_isRunning) return;
-
-    setState(() {
-      _isRunning = true;
-      _currentOperation = 'Packaging Search';
-    });
-
-    _addDebugLog('PACKAGING_SEARCH', 'Starting packaging search analysis', LogLevel.info);
-
+  Future<void> _initializeLogging() async {
     try {
-      final packagingImages = _getImagesByLabel('packaging');
-      _addDebugLog('PACKAGING_SEARCH', 'Found ${packagingImages.length} packaging images', LogLevel.info, {
-        'images': packagingImages,
-      });
+      Directory logDirectory;
 
-      if (packagingImages.isEmpty) {
-        _addDebugLog('PACKAGING_SEARCH', 'No packaging images available - cannot proceed', LogLevel.warning);
-        return;
-      }
-
-      _addDebugLog('PACKAGING_SEARCH', 'Step 1: Performing intelligent analysis on packaging images', LogLevel.info);
-
-      Map<String, String> ocrResults = {};
-      for (int i = 0; i < packagingImages.length; i++) {
-        final imagePath = packagingImages[i];
-        _addDebugLog('PACKAGING_SEARCH', 'Processing image ${i + 1}/${packagingImages.length}: ${imagePath.split('/').last}', LogLevel.info);
-
-        try {
-          final result = await CloudServices.analyzeProductLabel(imagePath, imageType: 'packaging');
-
-          if (result['success'] == true) {
-            final analysis = result['analysis'] as Map<String, dynamic>;
-
-            _addDebugLog('PACKAGING_SEARCH', 'Analysis Result ${i + 1}: Found product data', LogLevel.success, {
-              'imagePath': imagePath,
-              'extractedText': result['extractedText'],
-              'manufacturer': analysis['manufacturer'],
-              'productName': analysis['productName'],
-              'modelNumber': analysis['modelNumber'],
-              'productType': analysis['productType'],
-              'confidence': result['confidence'],
-              'fullAnalysis': analysis,
-            });
-
-            ocrResults['packaging_$i'] = result['extractedText'];
-          } else {
-            _addDebugLog('PACKAGING_SEARCH', 'Analysis failed for image ${i + 1}: ${result['error']}', LogLevel.error);
-          }
-        } catch (e) {
-          _addDebugLog('PACKAGING_SEARCH', 'Processing failed for image ${i + 1}: $e', LogLevel.error);
+      if (Platform.isAndroid) {
+        // Android: Use external storage Downloads folder
+        final externalDir = await getExternalStorageDirectory();
+        if (externalDir != null) {
+          logDirectory = Directory('${externalDir.path}/Download');
+        } else {
+          // Fallback to application documents if external storage not available
+          logDirectory = await getApplicationDocumentsDirectory();
         }
+      } else {
+        // iOS: Use application documents directory
+        logDirectory = await getApplicationDocumentsDirectory();
       }
 
-      _addDebugLog('PACKAGING_SEARCH', 'Step 2: Calling CloudServices.searchPackaging()', LogLevel.info);
+      // Create directory if it doesn't exist
+      if (!await logDirectory.exists()) {
+        await logDirectory.create(recursive: true);
+      }
 
-      final searchResults = await CloudServices.searchPackaging(packagingImages);
-      _addDebugLog('PACKAGING_SEARCH', 'Packaging search API call completed', LogLevel.success, {
-        'searchResults': searchResults,
-      });
+      final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-').split('.')[0];
+      _logFilePath = '${logDirectory.path}/restoreid_debug_$timestamp.log';
 
-      final confidence = searchResults['confidence'] ?? 0.0;
-      final candidatesCount = (searchResults['candidates'] as List?)?.length ?? 0;
+      _addLog('Log file location: $_logFilePath');
+      _addLog('Platform: ${Platform.operatingSystem}');
+      _addLog('Log directory: ${logDirectory.path}');
 
-      _addDebugLog('PACKAGING_SEARCH', 'Search analysis complete', LogLevel.success, {
-        'confidence': confidence,
-        'candidatesFound': candidatesCount,
-        'summary': 'Confidence: ${(confidence * 100).toInt()}%, Results found: ${searchResults['products']?.length ?? 0}',
-      });
+      // Test write access
+      await _writeLogToFile('=== ReStoreID Debug Log Session Started ===\n');
+      _addLog('✓ Log file write access confirmed\n');
 
     } catch (e) {
-      _addDebugLog('PACKAGING_SEARCH', 'Packaging search failed with error: $e', LogLevel.error, {
-        'error': e.toString(),
-      });
-    } finally {
-      setState(() {
-        _isRunning = false;
-        _currentOperation = '';
-      });
-      _addDebugLog('PACKAGING_SEARCH', 'Packaging search operation completed', LogLevel.info);
+      _addLog('❌ Error initializing log file: $e');
+      _logFilePath = null;
     }
   }
 
-  Future<void> _runBarcodeSearch() async {
-    if (_isRunning) return;
+  void _addLog(String message) {
+    final timestamp = DateTime.now().toIso8601String();
+    final logEntry = '[$timestamp] $message';
 
     setState(() {
-      _isRunning = true;
-      _currentOperation = 'Barcode Search';
+      _debugLogs.add(logEntry);
     });
 
-    _addDebugLog('BARCODE_SEARCH', 'Starting barcode search analysis', LogLevel.info);
+    // Write to file if available
+    if (_logFilePath != null) {
+      _writeLogToFile('$logEntry\n');
+    }
+
+    // Auto-scroll to bottom
+    if (_autoScroll) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          _scrollController.animateTo(
+            _scrollController.position.maxScrollExtent,
+            duration: Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+    }
+
+    print(logEntry); // Also print to console
+  }
+
+  Future<void> _writeLogToFile(String content) async {
+    if (_logFilePath == null) return;
 
     try {
-      final barcodeImages = _getImagesByLabel('barcode');
-      _addDebugLog('BARCODE_SEARCH', 'Found ${barcodeImages.length} barcode images', LogLevel.info, {
-        'images': barcodeImages,
-      });
-
-      if (barcodeImages.isEmpty) {
-        _addDebugLog('BARCODE_SEARCH', 'No barcode images available - cannot proceed', LogLevel.warning);
-        return;
-      }
-
-      _addDebugLog('BARCODE_SEARCH', 'Step 1: Detecting barcodes and UPCs', LogLevel.info);
-
-      final barcodeResults = await CloudServices.detectBarcodesAndUPCs(barcodeImages);
-      _addDebugLog('BARCODE_SEARCH', 'Barcode detection completed', LogLevel.success, {
-        'barcodeResults': barcodeResults,
-      });
-
-      final barcodes = List<String>.from(barcodeResults['barcodes'] ?? []);
-      final upcs = List<String>.from(barcodeResults['upcs'] ?? []);
-      final allCodes = [...barcodes, ...upcs];
-
-      _addDebugLog('BARCODE_SEARCH', 'Detected codes: ${barcodes.length} barcodes, ${upcs.length} UPCs', LogLevel.info, {
-        'barcodes': barcodes,
-        'upcs': upcs,
-        'allCodes': allCodes,
-      });
-
-      _addDebugLog('BARCODE_SEARCH', 'Step 2: Generating search candidates', LogLevel.info);
-
-      List<Map<String, dynamic>> candidates = [];
-      for (String code in allCodes.take(5)) {
-        candidates.add({
-          'title': 'UPC Database: $code',
-          'url': 'https://www.upcitemdb.com/upc/$code',
-          'confidence': 0.9,
-          'type': 'barcode_lookup',
-          'site': 'UPC Database',
-          'searchTerm': code,
-        });
-
-        candidates.add({
-          'title': 'eBay Search: $code',
-          'url': 'https://www.ebay.com/sch/i.html?_nkw=${Uri.encodeComponent(code)}',
-          'confidence': 0.8,
-          'type': 'barcode_search',
-          'site': 'eBay',
-          'searchTerm': code,
-        });
-      }
-
-      _addDebugLog('BARCODE_SEARCH', 'Search candidates generated', LogLevel.success, {
-        'candidatesGenerated': candidates.length,
-        'allCandidates': candidates,
-      });
-
-      for (int i = 0; i < candidates.length; i++) {
-        final candidate = candidates[i];
-        _addDebugLog('BARCODE_SEARCH', 'Candidate ${i + 1}: ${candidate['title']}', LogLevel.info, {
-          'candidate': candidate,
-        });
-      }
-
+      final file = File(_logFilePath!);
+      await file.writeAsString(content, mode: FileMode.append);
     } catch (e) {
-      _addDebugLog('BARCODE_SEARCH', 'Barcode search failed with error: $e', LogLevel.error, {
-        'error': e.toString(),
-      });
-    } finally {
-      setState(() {
-        _isRunning = false;
-        _currentOperation = '';
-      });
-      _addDebugLog('BARCODE_SEARCH', 'Barcode search operation completed', LogLevel.info);
+      print('Error writing to log file: $e');
     }
   }
 
-  Future<void> _runReverseImageSearch() async {
-    if (_isRunning) return;
+  Future<void> _testOCR() async {
+    if (_currentItem == null || _currentItem!.images.isEmpty) {
+      _addLog('❌ No item or images available for OCR test');
+      return;
+    }
 
     setState(() {
-      _isRunning = true;
-      _currentOperation = 'Reverse Image Search';
+      _isAnalyzing = true;
     });
 
-    _addDebugLog('REVERSE_SEARCH', 'Starting reverse image search analysis', LogLevel.info);
-
     try {
-      final idImages = _getImagesByLabel('id');
-      _addDebugLog('REVERSE_SEARCH', 'Found ${idImages.length} ID images', LogLevel.info, {
-        'images': idImages,
-      });
+      _addLog('\n🔍 TESTING OCR PROCESSING');
+      _addLog('Images to process: ${_currentItem!.images.length}');
 
-      if (idImages.isEmpty) {
-        _addDebugLog('REVERSE_SEARCH', 'No ID images available - cannot proceed', LogLevel.warning);
-        return;
-      }
+      for (int i = 0; i < _currentItem!.images.length; i++) {
+        final imagePath = _currentItem!.images[i];
+        _addLog('\n--- Processing Image ${i + 1} ---');
+        _addLog('Image path: $imagePath');
 
-      _addDebugLog('REVERSE_SEARCH', 'Step 1: Preparing images for reverse search', LogLevel.info);
-
-      for (int i = 0; i < idImages.length; i++) {
-        final imagePath = idImages[i];
+        // Check if file exists
         final file = File(imagePath);
-        final exists = await file.exists();
-        final size = exists ? await file.length() : 0;
+        if (!await file.exists()) {
+          _addLog('❌ ERROR: Image file does not exist');
+          continue;
+        }
 
-        _addDebugLog('REVERSE_SEARCH', 'Image ${i + 1}: ${imagePath.split('/').last} (${size} bytes)',
-            exists ? LogLevel.info : LogLevel.warning, {
-              'imagePath': imagePath,
-              'exists': exists,
-              'sizeBytes': size,
+        final fileSize = await file.length();
+        _addLog('✓ File exists, size: ${fileSize} bytes');
+
+        try {
+          _addLog('🚀 Calling CloudServices.performOCR...');
+          _addLog('Image path: $imagePath');
+
+          // Check CloudServices configuration first
+          _addLog('🔧 Checking CloudServices configuration...');
+
+          final ocrResults = await CloudServices.performOCR([imagePath]);
+
+          if (ocrResults.isNotEmpty) {
+            _addLog('✅ OCR SUCCESS for image ${i + 1}');
+            _addLog('Raw OCR Results:');
+            ocrResults.forEach((imagePath, text) {
+              _addLog('Image: ${imagePath.split('/').last}');
+              _addLog('OCR Text Length: ${text.length} characters');
+              if (text.length > 0) {
+                _addLog('OCR Text Content:');
+                _addLog('--- START OCR TEXT ---');
+                _addLog(text);
+                _addLog('--- END OCR TEXT ---');
+              } else {
+                _addLog('⚠️ OCR returned empty text');
+              }
             });
-      }
+          } else {
+            _addLog('⚠️ OCR returned empty results for image ${i + 1}');
+            _addLog('This could indicate:');
+            _addLog('- OCR service not configured');
+            _addLog('- API key missing or invalid');
+            _addLog('- Network connectivity issues');
+            _addLog('- Image format not supported');
+          }
 
-      _addDebugLog('REVERSE_SEARCH', 'Step 2: Calling CloudServices.reverseImageSearchWithCandidates()', LogLevel.info);
+        } catch (e, stackTrace) {
+          _addLog('❌ OCR ERROR for image ${i + 1}: $e');
+          _addLog('Error type: ${e.runtimeType}');
+          _addLog('Stack trace: $stackTrace');
 
-      final searchResults = await CloudServices.reverseImageSearchWithCandidates(idImages);
-      _addDebugLog('REVERSE_SEARCH', 'Reverse image search API call completed', LogLevel.success, {
-        'searchResults': searchResults,
-      });
-
-      final confidence = searchResults['confidence'] ?? 0.0;
-      final candidatesCount = (searchResults['candidates'] as List?)?.length ?? 0;
-      final text = searchResults['text'] ?? '';
-
-      _addDebugLog('REVERSE_SEARCH', 'Search analysis complete', LogLevel.success, {
-        'confidence': confidence,
-        'candidatesFound': candidatesCount,
-        'extractedText': text.length > 100 ? '${text.substring(0, 100)}...' : text,
-        'summary': 'Confidence: ${(confidence * 100).toInt()}%, Candidates: $candidatesCount',
-      });
-
-      if (candidatesCount > 0) {
-        final candidates = searchResults['candidates'] as List;
-        for (int i = 0; i < candidates.length; i++) {
-          final candidate = candidates[i];
-          _addDebugLog('REVERSE_SEARCH', 'Candidate ${i + 1}: ${candidate['title'] ?? 'Unknown'}', LogLevel.info, {
-            'candidate': candidate,
-          });
+          // Additional debugging for common OCR issues
+          if (e.toString().contains('API')) {
+            _addLog('💡 Possible API configuration issue - check CloudServices setup');
+          }
+          if (e.toString().contains('network') || e.toString().contains('connection')) {
+            _addLog('💡 Network issue - check internet connection');
+          }
+          if (e.toString().contains('key') || e.toString().contains('auth')) {
+            _addLog('💡 Authentication issue - check API keys');
+          }
         }
       }
 
-    } catch (e) {
-      _addDebugLog('REVERSE_SEARCH', 'Reverse image search failed with error: $e', LogLevel.error, {
-        'error': e.toString(),
-      });
+      // Test full OCR processing
+      _addLog('\n🔄 Testing full batch OCR processing...');
+      try {
+        final allOcrResults = await CloudServices.performOCR(_currentItem!.images);
+        _addLog('✅ Batch OCR completed');
+        _addLog('Total results: ${allOcrResults.length}');
+
+        if (allOcrResults.isNotEmpty) {
+          // Update item with results
+          final updatedItem = _currentItem!.copyWith(
+            ocrResults: allOcrResults,
+            ocrCompleted: true,
+          );
+          await StorageService.saveJob(updatedItem);
+          setState(() {
+            _currentItem = updatedItem;
+          });
+          _addLog('💾 Updated item with OCR results');
+        }
+
+      } catch (e, stackTrace) {
+        _addLog('❌ Batch OCR ERROR: $e');
+        _addLog('Stack trace: $stackTrace');
+      }
+
     } finally {
       setState(() {
-        _isRunning = false;
-        _currentOperation = '';
+        _isAnalyzing = false;
       });
-      _addDebugLog('REVERSE_SEARCH', 'Reverse image search operation completed', LogLevel.info);
     }
   }
 
-  Future<void> _runIntelligentAnalysis() async {
-    if (_isRunning) return;
+  Future<void> _testAIIdentification() async {
+    if (_currentItem == null || _currentItem!.images.isEmpty) {
+      _addLog('❌ No item or images available for AI identification test');
+      return;
+    }
 
     setState(() {
-      _isRunning = true;
-      _currentOperation = 'Intelligent Analysis';
+      _isAnalyzing = true;
     });
 
-    _addDebugLog('INTELLIGENT_ANALYSIS', 'Starting intelligent product analysis on all images', LogLevel.info);
-
     try {
-      Map<String, Map<String, dynamic>> allAnalyses = {};
+      _addLog('\n🤖 TESTING AI PRODUCT IDENTIFICATION');
+      _addLog('Images to analyze: ${_currentItem!.images.length}');
 
-      for (int i = 0; i < widget.item.images.length; i++) {
-        final imagePath = widget.item.images[i];
-        final fileName = imagePath.split('/').last;
+      // Test each image individually first
+      for (int i = 0; i < _currentItem!.images.length; i++) {
+        final imagePath = _currentItem!.images[i];
+        _addLog('\n--- AI Analysis Image ${i + 1} ---');
+        _addLog('Image path: $imagePath');
 
-        String imageType = 'label';
-        if (widget.item.imageClassification != null) {
-          for (var entry in widget.item.imageClassification!.entries) {
-            if (entry.value.contains(imagePath)) {
-              imageType = entry.key;
-              break;
-            }
-          }
+        // Check if file exists
+        final file = File(imagePath);
+        if (!await file.exists()) {
+          _addLog('❌ ERROR: Image file does not exist');
+          continue;
         }
 
-        _addDebugLog('INTELLIGENT_ANALYSIS', 'Analyzing image ${i + 1}/${widget.item.images.length}: $fileName as $imageType', LogLevel.info);
+        final fileSize = await file.length();
+        _addLog('✓ File exists, size: ${fileSize} bytes');
 
         try {
-          final result = await CloudServices.analyzeProductLabel(imagePath, imageType: imageType);
+          _addLog('🚀 Calling AI analysis for single image...');
 
-          if (result['success'] == true) {
-            final analysis = result['analysis'] as Map<String, dynamic>;
-            allAnalyses[fileName] = {
-              'imageType': imageType,
-              'extractedText': result['extractedText'],
-              'analysis': analysis,
-              'confidence': result['confidence'],
+          // Call the individual image analysis method directly
+          final imageResult = await AIProductIdentificationService.analyzeImage(imagePath);
+
+          _addLog('📊 AI Image Analysis Result:');
+          _addLog('Success: ${imageResult['success']}');
+
+          if (imageResult['success'] == true) {
+            _addLog('✅ AI analysis successful for image ${i + 1}');
+
+            if (imageResult['rawResponse'] != null) {
+              _addLog('Raw AI Response:');
+              _addLog('--- START AI RESPONSE ---');
+              _addLog(imageResult['rawResponse']);
+              _addLog('--- END AI RESPONSE ---');
+            }
+
+            if (imageResult['aiResults'] != null) {
+              _addLog('Parsed AI Results:');
+              final aiResults = imageResult['aiResults'];
+              _addLog(JsonEncoder.withIndent('  ').convert(aiResults));
+            }
+
+            if (imageResult['parseError'] != null) {
+              _addLog('⚠️ Parse Warning: ${imageResult['parseError']}');
+            }
+
+          } else {
+            _addLog('❌ AI analysis failed for image ${i + 1}');
+            _addLog('Error: ${imageResult['error']}');
+          }
+
+        } catch (e, stackTrace) {
+          _addLog('❌ AI ANALYSIS ERROR for image ${i + 1}: $e');
+          _addLog('Stack trace: $stackTrace');
+        }
+      }
+
+      // Test full batch AI processing
+      _addLog('\n🔄 Testing full batch AI identification...');
+      try {
+        final aiResults = await AIProductIdentificationService.analyzeMultipleImages(_currentItem!.images);
+
+        _addLog('✅ Batch AI identification completed');
+        _addLog('Overall Success: ${aiResults['success']}');
+        _addLog('Images Processed: ${aiResults['imagesProcessed']}');
+
+        if (aiResults['success'] == true) {
+          _addLog('📊 Consolidated AI Results:');
+          _addLog(JsonEncoder.withIndent('  ').convert(aiResults['results']));
+
+          if (aiResults['results']['validation'] != null) {
+            _addLog('🔍 Validation Results:');
+            _addLog(JsonEncoder.withIndent('  ').convert(aiResults['results']['validation']));
+          }
+        } else {
+          _addLog('❌ Batch AI identification failed: ${aiResults['error']}');
+        }
+
+      } catch (e, stackTrace) {
+        _addLog('❌ Batch AI identification ERROR: $e');
+        _addLog('Stack trace: $stackTrace');
+      }
+
+    } finally {
+      setState(() {
+        _isAnalyzing = false;
+      });
+    }
+  }
+
+  Future<void> _testSearchQueries() async {
+    if (_currentItem == null) {
+      _addLog('❌ No item available for search query test');
+      return;
+    }
+
+    setState(() {
+      _isAnalyzing = true;
+    });
+
+    try {
+      _addLog('\n🔍 TESTING SEARCH QUERY GENERATION');
+
+      // First test with current OCR results if available
+      if (_currentItem!.ocrResults != null && _currentItem!.ocrResults!.isNotEmpty) {
+        _addLog('\n📝 Testing with existing OCR results...');
+        _addLog('OCR Results count: ${_currentItem!.ocrResults!.length}');
+        _currentItem!.ocrResults!.forEach((imagePath, text) {
+          _addLog('\nImage: ${imagePath.split('/').last}');
+          _addLog('OCR Text (${text.length} chars): ${text.substring(0, text.length > 300 ? 300 : text.length)}${text.length > 300 ? '...' : ''}');
+        });
+
+        try {
+          _addLog('\n🎯 Extracting product identifiers using TargetedSearchService...');
+          final productInfo = TargetedSearchService.extractProductIdentifiers(_currentItem!.ocrResults!);
+
+          _addLog('\n📊 Product Identification Results:');
+          _addLog('Raw productInfo keys: ${productInfo.keys.toList()}');
+          _addLog(JsonEncoder.withIndent('  ').convert(productInfo));
+
+          // Test search query generation with detailed logging
+          _addLog('\n🚀 Generating targeted search queries...');
+          _addLog('Input parameters:');
+          _addLog('  manufacturer: "${productInfo['manufacturer'] ?? ''}"');
+          _addLog('  productName: "${productInfo['productName'] ?? ''}"');
+          _addLog('  modelNumber: "${productInfo['modelNumber'] ?? ''}"');
+          _addLog('  partNumber: "${productInfo['partNumber'] ?? ''}"');
+
+          // Check if we have enough data for search
+          final manufacturer = productInfo['manufacturer']?.toString() ?? '';
+          final productName = productInfo['productName']?.toString() ?? '';
+
+          if (manufacturer.isEmpty && productName.isEmpty) {
+            _addLog('⚠️ WARNING: Both manufacturer and productName are empty!');
+            _addLog('This will likely cause search to fail or return no results');
+
+            // Test with manual data from what we know works
+            _addLog('\n🔧 Testing with manually extracted data from successful AI results...');
+            final manualProductInfo = {
+              'manufacturer': 'Seeed Studio',
+              'productName': 'reCamera 2002 Series',
+              'modelNumber': 'reCamera 2002w 64GB',
+              'partNumber': '',
             };
 
-            _addDebugLog('INTELLIGENT_ANALYSIS', 'Analysis completed for $fileName', LogLevel.success, {
-              'imageType': imageType,
-              'manufacturer': analysis['manufacturer'],
-              'productName': analysis['productName'],
-              'modelNumber': analysis['modelNumber'],
-              'confidence': result['confidence'],
-            });
-          } else {
-            _addDebugLog('INTELLIGENT_ANALYSIS', 'Analysis failed for $fileName: ${result['error']}', LogLevel.error);
+            _addLog('Manual test parameters:');
+            _addLog('  manufacturer: "${manualProductInfo['manufacturer']}"');
+            _addLog('  productName: "${manualProductInfo['productName']}"');
+            _addLog('  modelNumber: "${manualProductInfo['modelNumber']}"');
+
+            final manualSearchResults = await TargetedSearchService.performTargetedSearch(
+              manufacturer: manualProductInfo['manufacturer']!,
+              productName: manualProductInfo['productName']!,
+              modelNumber: manualProductInfo['modelNumber'],
+              partNumber: manualProductInfo['partNumber'],
+            );
+
+            _addLog('\n📊 Manual Search Results:');
+            _addLog('Success: ${manualSearchResults['success']}');
+            _addLog('Search Count: ${manualSearchResults['searchCount']}');
+            _addLog('Results Found: ${manualSearchResults['resultsFound']}');
+            _addLog('Manufacturer Used: "${manualSearchResults['manufacturer']}"');
+            _addLog('Product Name Used: "${manualSearchResults['productName']}"');
+
+            if (manualSearchResults['searchResults'] != null) {
+              final results = List<Map<String, dynamic>>.from(manualSearchResults['searchResults']);
+              _addLog('\n🔗 Manual Search Individual Results:');
+              for (int i = 0; i < results.length && i < 3; i++) {
+                final result = results[i];
+                _addLog('\n--- Manual Result ${i + 1} ---');
+                _addLog('Title: ${result['title']}');
+                _addLog('URL: ${result['url']}');
+                _addLog('Search Type: ${result['searchType']}');
+                _addLog('Confidence: ${result['confidence']}');
+              }
+            }
           }
-        } catch (e) {
-          _addDebugLog('INTELLIGENT_ANALYSIS', 'Error analyzing $fileName: $e', LogLevel.error);
+
+          // Continue with original search
+          final searchResults = await TargetedSearchService.performTargetedSearch(
+            manufacturer: manufacturer,
+            productName: productName,
+            modelNumber: productInfo['modelNumber'],
+            partNumber: productInfo['partNumber'],
+          );
+
+          _addLog('\n📊 OCR-based Search Query Results:');
+          _addLog('Success: ${searchResults['success']}');
+          _addLog('Search Count: ${searchResults['searchCount']}');
+          _addLog('Results Found: ${searchResults['resultsFound']}');
+          _addLog('Manufacturer Used: "${searchResults['manufacturer']}"');
+          _addLog('Product Name Used: "${searchResults['productName']}"');
+
+          // Log the raw search results structure
+          _addLog('\n🔍 Raw Search Results Structure:');
+          _addLog('Keys in searchResults: ${searchResults.keys.toList()}');
+
+          if (searchResults['searchResults'] != null) {
+            final results = List<Map<String, dynamic>>.from(searchResults['searchResults']);
+            _addLog('\n🔗 Individual Search Results:');
+            _addLog('Total results: ${results.length}');
+
+            for (int i = 0; i < results.length && i < 5; i++) {
+              final result = results[i];
+              _addLog('\n--- Search Result ${i + 1} ---');
+              _addLog('Keys: ${result.keys.toList()}');
+              _addLog('Title: ${result['title']}');
+              _addLog('URL: ${result['url']}');
+              _addLog('Search Type: ${result['searchType']}');
+              _addLog('Confidence: ${result['confidence']}');
+              _addLog('Found At: ${result['foundAt']}');
+              if (result['snippet'] != null) {
+                final snippet = result['snippet'].toString();
+                _addLog('Snippet: ${snippet.length > 200 ? snippet.substring(0, 200) + '...' : snippet}');
+              }
+            }
+
+            if (results.length > 5) {
+              _addLog('\n... and ${results.length - 5} more results');
+            }
+          } else {
+            _addLog('⚠️ searchResults[\'searchResults\'] is null');
+          }
+
+        } catch (e, stackTrace) {
+          _addLog('❌ Search query generation ERROR: $e');
+          _addLog('Stack trace: $stackTrace');
+        }
+
+      } else {
+        _addLog('⚠️ No OCR results available - testing with user descriptions...');
+
+        // Create mock OCR from user descriptions for testing
+        Map<String, String> mockOCR = {};
+        if (_currentItem!.userDescription.isNotEmpty) {
+          mockOCR['user_description'] = _currentItem!.userDescription;
+        }
+        if (_currentItem!.searchDescription.isNotEmpty) {
+          mockOCR['search_description'] = _currentItem!.searchDescription;
+        }
+
+        if (mockOCR.isNotEmpty) {
+          _addLog('📝 Testing with mock OCR from user input...');
+          _addLog('Mock OCR: $mockOCR');
+
+          try {
+            final productInfo = TargetedSearchService.extractProductIdentifiers(mockOCR);
+            _addLog('📊 Product Identification from User Input:');
+            _addLog(JsonEncoder.withIndent('  ').convert(productInfo));
+
+            // Test search with user data
+            final searchResults = await TargetedSearchService.performTargetedSearch(
+              manufacturer: productInfo['manufacturer'] ?? '',
+              productName: productInfo['productName'] ?? '',
+              modelNumber: productInfo['modelNumber'],
+              partNumber: productInfo['partNumber'],
+            );
+
+            _addLog('📊 User-based Search Results:');
+            _addLog(JsonEncoder.withIndent('  ').convert(searchResults));
+
+          } catch (e, stackTrace) {
+            _addLog('❌ Mock search ERROR: $e');
+            _addLog('Stack trace: $stackTrace');
+          }
+        } else {
+          _addLog('❌ No user descriptions available for testing');
         }
       }
 
-      _addDebugLog('INTELLIGENT_ANALYSIS', 'Synthesis completed with ${allAnalyses.length} analyzed images', LogLevel.success, {
-        'totalAnalyzed': allAnalyses.length,
-      });
-
-    } catch (e) {
-      _addDebugLog('INTELLIGENT_ANALYSIS', 'Intelligent analysis failed with error: $e', LogLevel.error, {
-        'error': e.toString(),
-      });
     } finally {
       setState(() {
-        _isRunning = false;
-        _currentOperation = '';
+        _isAnalyzing = false;
       });
-      _addDebugLog('INTELLIGENT_ANALYSIS', 'Intelligent analysis operation completed', LogLevel.info);
     }
   }
 
-  List<String> _getImagesByLabel(String label) {
-    if (widget.item.imageClassification == null) {
-      return [];
+  Future<void> _runFullAnalysis() async {
+    if (_currentItem == null) {
+      _addLog('❌ No item selected for analysis');
+      return;
     }
-    return widget.item.imageClassification![label] ?? [];
+
+    setState(() {
+      _isAnalyzing = true;
+    });
+
+    try {
+      _addLog('\n🔍 STARTING FULL ENHANCED ANALYSIS');
+      _addLog('Item ID: ${_currentItem!.id}');
+      _addLog('Description: ${_currentItem!.userDescription}');
+      _addLog('Search Keywords: ${_currentItem!.searchDescription}');
+      _addLog('Images: ${_currentItem!.images.length}');
+
+      // Log all image paths
+      for (int i = 0; i < _currentItem!.images.length; i++) {
+        _addLog('Image ${i + 1}: ${_currentItem!.images[i]}');
+      }
+
+      _addLog('\n🚀 Calling EnhancedAnalysisService.performCompleteAnalysis...');
+
+      final analysisResult = await EnhancedAnalysisService.performCompleteAnalysis(_currentItem!);
+
+      _addLog('\n📋 COMPLETE ANALYSIS RESULT:');
+      _addLog('Success: ${analysisResult['success']}');
+
+      if (analysisResult['success'] == true) {
+        final analysis = analysisResult['analysis'];
+        _addLog('Overall Confidence: ${(analysis['overallConfidence'] * 100).toStringAsFixed(1)}%');
+        _addLog('Analysis Type: ${analysis['analysisType']}');
+        _addLog('Identification Method: ${analysis['identificationMethod']}');
+
+        // Product Info
+        _addLog('\n🏷️ PRODUCT INFORMATION:');
+        if (analysis['productInfo'] != null) {
+          _addLog(JsonEncoder.withIndent('  ').convert(analysis['productInfo']));
+        }
+
+        // Search Summary
+        _addLog('\n🔍 SEARCH SUMMARY:');
+        if (analysis['searchSummary'] != null) {
+          _addLog(JsonEncoder.withIndent('  ').convert(analysis['searchSummary']));
+        }
+
+        // Content Summary
+        _addLog('\n📄 CONTENT SUMMARY:');
+        if (analysis['contentSummary'] != null) {
+          _addLog(JsonEncoder.withIndent('  ').convert(analysis['contentSummary']));
+        }
+
+        // Summary
+        _addLog('\n📝 GENERATED SUMMARY:');
+        if (analysis['summary'] != null) {
+          _addLog(JsonEncoder.withIndent('  ').convert(analysis['summary']));
+        }
+
+        // Pricing
+        _addLog('\n💰 PRICING ANALYSIS:');
+        if (analysis['pricing'] != null) {
+          _addLog(JsonEncoder.withIndent('  ').convert(analysis['pricing']));
+        }
+
+        // Raw Data (for detailed debugging)
+        _addLog('\n🔧 RAW DEBUG DATA:');
+        if (analysis['rawData'] != null) {
+          _addLog('Raw data contains: ${analysis['rawData'].keys}');
+
+          // Log each raw data section
+          analysis['rawData'].forEach((key, value) {
+            _addLog('\n--- Raw $key ---');
+            try {
+              _addLog(JsonEncoder.withIndent('  ').convert(value));
+            } catch (e) {
+              _addLog('Error serializing $key: $e');
+              _addLog('Value: $value');
+            }
+          });
+        }
+
+      } else {
+        _addLog('❌ Analysis Error: ${analysisResult['error']}');
+        if (analysisResult['stackTrace'] != null) {
+          _addLog('Stack trace: ${analysisResult['stackTrace']}');
+        }
+      }
+
+      // Reload item to get updated data
+      final updatedItem = await StorageService.getJob(_currentItem!.id);
+      if (updatedItem != null) {
+        setState(() {
+          _currentItem = updatedItem;
+        });
+        _addLog('🔄 Reloaded updated item from storage');
+      }
+
+      _addLog('\n✅ FULL ANALYSIS COMPLETE');
+
+    } catch (e, stackTrace) {
+      _addLog('❌ FULL ANALYSIS FAILED: $e');
+      _addLog('Stack trace: $stackTrace');
+    } finally {
+      setState(() {
+        _isAnalyzing = false;
+      });
+    }
+  }
+
+  Future<void> _exportLogs() async {
+    if (_logFilePath == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No log file available')),
+      );
+      return;
+    }
+
+    try {
+      // Copy log path to clipboard
+      await Clipboard.setData(ClipboardData(text: _logFilePath!));
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Log file path copied to clipboard:\n$_logFilePath'),
+          duration: Duration(seconds: 5),
+        ),
+      );
+
+      _addLog('📋 Log file path copied to clipboard');
+
+    } catch (e) {
+      _addLog('❌ Error exporting logs: $e');
+    }
   }
 
   Future<void> _clearLogs() async {
     setState(() {
       _debugLogs.clear();
     });
-    _addDebugLog('SYSTEM', 'Debug logs cleared', LogLevel.info);
-  }
 
-  Future<void> _exportLogs() async {
-    try {
-      final directory = await getApplicationDocumentsDirectory();
-      final file = File('${directory.path}/debug_analysis_${widget.item.id}.txt');
-
-      if (await file.exists()) {
-        final content = await file.readAsString();
-        _addDebugLog('EXPORT', 'Logs exported to: ${file.path}', LogLevel.success, {
-          'filePath': file.path,
-          'fileSize': content.length,
-          'directoryPath': directory.path,
-        });
-
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: Text('Logs Exported'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('File saved to:', style: TextStyle(fontWeight: FontWeight.bold)),
-                SizedBox(height: 8),
-                SelectableText(file.path, style: TextStyle(fontFamily: 'monospace', fontSize: 12)),
-                SizedBox(height: 16),
-                Text('Directory:', style: TextStyle(fontWeight: FontWeight.bold)),
-                SizedBox(height: 4),
-                SelectableText(directory.path, style: TextStyle(fontFamily: 'monospace', fontSize: 12)),
-                SizedBox(height: 16),
-                Text('File size: ${content.length} characters'),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: Text('OK'),
-              ),
-            ],
-          ),
-        );
-      } else {
-        _addDebugLog('EXPORT', 'No log file found to export', LogLevel.warning);
-      }
-    } catch (e) {
-      _addDebugLog('EXPORT', 'Export failed: $e', LogLevel.error);
-    }
-  }
-
-  Color _getLogLevelColor(LogLevel level) {
-    switch (level) {
-      case LogLevel.success:
-        return Colors.green;
-      case LogLevel.warning:
-        return Colors.orange;
-      case LogLevel.error:
-        return Colors.red;
-      case LogLevel.info:
-      default:
-        return Colors.blue;
-    }
-  }
-
-  IconData _getLogLevelIcon(LogLevel level) {
-    switch (level) {
-      case LogLevel.success:
-        return Icons.check_circle;
-      case LogLevel.warning:
-        return Icons.warning;
-      case LogLevel.error:
-        return Icons.error;
-      case LogLevel.info:
-      default:
-        return Icons.info;
-    }
+    _addLog('🧹 Logs cleared');
   }
 
   @override
@@ -511,217 +676,211 @@ class _DebugAnalysisScreenState extends State<DebugAnalysisScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text('Debug Analysis'),
-        backgroundColor: Colors.indigo[600],
+        backgroundColor: Colors.orange[600],
         foregroundColor: Colors.white,
         actions: [
           IconButton(
-            onPressed: _clearLogs,
-            icon: Icon(Icons.clear_all),
-            tooltip: 'Clear Logs',
+            icon: Icon(Icons.file_download),
+            onPressed: _exportLogs,
+            tooltip: 'Export Log File',
           ),
           IconButton(
-            onPressed: _exportLogs,
-            icon: Icon(Icons.file_download),
-            tooltip: 'Export Logs',
+            icon: Icon(Icons.clear_all),
+            onPressed: _clearLogs,
+            tooltip: 'Clear Logs',
           ),
         ],
       ),
       body: Column(
         children: [
-          // Control Panel
+          // Controls
           Container(
             padding: EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.grey[100],
-              border: Border(bottom: BorderSide(color: Colors.grey[300]!)),
-            ),
+            color: Colors.grey[100],
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Item: ${widget.item.userDescription}',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                ),
-                SizedBox(height: 8),
-                Text(
-                  'Search Keywords: ${widget.item.searchDescription}',
-                  style: TextStyle(color: Colors.grey[600]),
-                ),
-                SizedBox(height: 16),
+                // Item Selection
+                if (_currentItem != null)
+                  Container(
+                    width: double.infinity,
+                    padding: EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue[50],
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue[200]!),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Current Item: ${_currentItem!.userDescription}',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            color: Colors.blue[800],
+                          ),
+                        ),
+                        Text(
+                          'Images: ${_currentItem!.images.length} • OCR: ${_currentItem!.ocrResults?.isNotEmpty == true ? "Available" : "None"} • Created: ${_currentItem!.createdAt.toString().split('.')[0]}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.blue[600],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                SizedBox(height: 12),
 
                 // Test Buttons
                 Row(
                   children: [
                     Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: _isRunning ? null : _runPackagingSearch,
-                        icon: Icon(Icons.inventory_2),
-                        label: Text('Test Packaging'),
+                      child: ElevatedButton(
+                        onPressed: _isAnalyzing ? null : _testOCR,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.purple[600],
                           foregroundColor: Colors.white,
                         ),
+                        child: Text('Test OCR'),
                       ),
                     ),
                     SizedBox(width: 8),
                     Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: _isRunning ? null : _runBarcodeSearch,
-                        icon: Icon(Icons.qr_code),
-                        label: Text('Test Barcode'),
+                      child: ElevatedButton(
+                        onPressed: _isAnalyzing ? null : _testAIIdentification,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.red[600],
+                          backgroundColor: Colors.indigo[600],
                           foregroundColor: Colors.white,
                         ),
-                      ),
-                    ),
-                    SizedBox(width: 8),
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: _isRunning ? null : _runReverseImageSearch,
-                        icon: Icon(Icons.search),
-                        label: Text('Test Reverse'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blue[600],
-                          foregroundColor: Colors.white,
-                        ),
+                        child: Text('Test AI ID'),
                       ),
                     ),
                   ],
                 ),
 
-                SizedBox(height: 12),
+                SizedBox(height: 8),
 
-                // Intelligent Analysis Button
-                Container(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: _isRunning ? null : _runIntelligentAnalysis,
-                    icon: Icon(Icons.psychology),
-                    label: Text('TEST INTELLIGENT ANALYSIS'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.teal[600],
-                      foregroundColor: Colors.white,
-                      padding: EdgeInsets.symmetric(vertical: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: _isAnalyzing ? null : _testSearchQueries,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.orange[600],
+                          foregroundColor: Colors.white,
+                        ),
+                        child: Text('Test Search'),
+                      ),
                     ),
-                  ),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: _isAnalyzing ? null : _runFullAnalysis,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green[600],
+                          foregroundColor: Colors.white,
+                        ),
+                        child: _isAnalyzing
+                            ? Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                              ),
+                            ),
+                            SizedBox(width: 8),
+                            Text('Running...'),
+                          ],
+                        )
+                            : Text('Full Analysis'),
+                      ),
+                    ),
+                  ],
                 ),
 
-                if (_isRunning) ...[
-                  SizedBox(height: 12),
-                  Row(
-                    children: [
-                      SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                SizedBox(height: 8),
+
+                // Auto-scroll toggle
+                Row(
+                  children: [
+                    Checkbox(
+                      value: _autoScroll,
+                      onChanged: (value) {
+                        setState(() {
+                          _autoScroll = value ?? true;
+                        });
+                      },
+                    ),
+                    Text('Auto-scroll to bottom'),
+                    Spacer(),
+                    if (_logFilePath != null)
+                      Text(
+                        'Log: ${_logFilePath!.split('/').last}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.green[600],
+                        ),
                       ),
-                      SizedBox(width: 8),
-                      Text('Running: $_currentOperation...'),
-                    ],
-                  ),
-                ],
+                  ],
+                ),
               ],
             ),
           ),
 
-          // Debug Log Display
+          // Log Display
           Expanded(
-            child: _debugLogs.isEmpty
-                ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.bug_report, size: 64, color: Colors.grey[400]),
-                  SizedBox(height: 16),
-                  Text(
-                    'Debug logs will appear here',
-                    style: TextStyle(color: Colors.grey[600]),
-                  ),
-                  SizedBox(height: 8),
-                  Text(
-                    'Click a test button to start debugging',
-                    style: TextStyle(color: Colors.grey[500], fontSize: 12),
-                  ),
-                ],
-              ),
-            )
-                : ListView.builder(
-              controller: _scrollController,
-              padding: EdgeInsets.all(8),
-              itemCount: _debugLogs.length,
-              itemBuilder: (context, index) {
-                final log = _debugLogs[index];
-                return Card(
-                  margin: EdgeInsets.only(bottom: 8),
-                  child: ExpansionTile(
-                    leading: Icon(
-                      _getLogLevelIcon(log.level),
-                      color: _getLogLevelColor(log.level),
-                    ),
-                    title: Text(
-                      log.operation,
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(log.message),
-                        SizedBox(height: 4),
-                        Text(
-                          '${log.timestamp.hour.toString().padLeft(2, '0')}:${log.timestamp.minute.toString().padLeft(2, '0')}:${log.timestamp.second.toString().padLeft(2, '0')}',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey[500],
-                          ),
-                        ),
-                      ],
-                    ),
-                    children: log.data != null
-                        ? [
-                      Container(
-                        width: double.infinity,
-                        padding: EdgeInsets.all(16),
-                        color: Colors.grey[50],
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Debug Data:',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: Colors.grey[700],
-                              ),
-                            ),
-                            SizedBox(height: 8),
-                            Container(
-                              width: double.infinity,
-                              padding: EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                border: Border.all(color: Colors.grey[300]!),
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: Text(
-                                JsonEncoder.withIndent('  ').convert(log.data),
-                                style: TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
+            child: Container(
+              color: Colors.black,
+              child: ListView.builder(
+                controller: _scrollController,
+                padding: EdgeInsets.all(8),
+                itemCount: _debugLogs.length,
+                itemBuilder: (context, index) {
+                  final log = _debugLogs[index];
+                  Color textColor = Colors.green[300]!;
+
+                  if (log.contains('❌') || log.contains('ERROR') || log.contains('FAILED')) {
+                    textColor = Colors.red[300]!;
+                  } else if (log.contains('⚠️') || log.contains('WARNING')) {
+                    textColor = Colors.orange[300]!;
+                  } else if (log.contains('✅') || log.contains('SUCCESS') || log.contains('✓')) {
+                    textColor = Colors.green[300]!;
+                  } else if (log.contains('🔍') || log.contains('STEP') || log.contains('===')) {
+                    textColor = Colors.cyan[300]!;
+                  } else if (log.contains('🤖') || log.contains('AI ')) {
+                    textColor = Colors.purple[300]!;
+                  } else if (log.contains('🚀') || log.contains('Calling')) {
+                    textColor = Colors.yellow[300]!;
+                  }
+
+                  return Padding(
+                    padding: EdgeInsets.symmetric(vertical: 1),
+                    child: SelectableText(
+                      log,
+                      style: TextStyle(
+                        color: textColor,
+                        fontSize: 12,
+                        fontFamily: 'monospace',
                       ),
-                    ]
-                        : [],
-                  ),
-                );
-              },
+                    ),
+                  );
+                },
+              ),
             ),
           ),
         ],
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 }
